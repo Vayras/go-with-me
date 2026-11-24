@@ -32,11 +32,3 @@ show_release_notes false
 // Copying: select text with the mouse and it's on your clipboard (paste with Cmd+V)
 copy_command "pbcopy"
 copy_on_select true
-
-// Web access (gwm web): the hub can be opened in a browser on your tailnet.
-// The server only ever listens on this Mac (127.0.0.1); Tailscale Serve publishes it over HTTPS to your
-// tailnet only, and every browser must log in with a token (gwm web token). Nothing is exposed otherwise.
-web_sharing "on"
-web_server false
-web_server_ip "127.0.0.1"
-web_server_port 8082
