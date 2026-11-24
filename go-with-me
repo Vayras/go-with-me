@@ -99,7 +99,7 @@ run_tty() {
   case "$t" in
     vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
           run_tty "$parent" "limactl shell --workdir / $vm -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
-    *) if is_local "$h"; then env -u TMUX "${SHELL:-/bin/zsh}" -lc "$s"
+    *) if is_local "$h"; then env -u TMUX -u TERM_SESSION_ID -u SHELL_SESSION_ID "${SHELL:-/bin/zsh}" -lc "$s"
        else ssh -t -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o LogLevel=ERROR \
               "$t" "exec \"\$SHELL\" -lc \"\$(printf %s $(b64 "$s") | base64 -d)\""; fi ;;
   esac
@@ -127,8 +127,6 @@ gpu=$(ioreg -r -d 1 -w 0 -c IOAccelerator 2>/dev/null | grep -o "\"Device Utiliz
 echo "H|$cpu|$used/${tot}G|${models:--}|${vms:-}|${gpu:+$gpu%}"
 curl -s -m 1 http://127.0.0.1:11434/api/ps 2>/dev/null | python3 -c "import sys, json
 for m in json.load(sys.stdin).get(\"models\", []): print(\"M|%s|%.1f|%s\" % (m[\"name\"], (m.get(\"size_vram\") or m.get(\"size\", 0)) / 1e9, (m.get(\"details\") or {}).get(\"format\", \"\")))" 2>/dev/null
-ps -Aceo pcpu=,rss=,comm= -r 2>/dev/null | grep -vE " (top|ps|zsh|bash|awk|grep|head|sshd-session|login|curl|python3|ioreg)\$" | head -3 |
-  awk "{c=\$1; r=\$2; \$1=\$2=\"\"; sub(/^ +/,\"\"); printf \"P|%s|%s|%d\\n\", \$0, c, r/1024}"
 if command -v tmux >/dev/null; then
   now=$(date +%s)
   tmux list-sessions -F "#{session_name}|#{session_activity}|#{session_attached}|#{pane_title}" 2>/dev/null | grep "^gwm-" |
@@ -150,7 +148,6 @@ demo_probe() {  # fake but lively data for `gwm demo`
   local t=$(( $(date +%s) / 5 )) r=$RANDOM
   echo "studio|H|$((18 + r % 15))%|31/64G|inkling-2-mini,cam-r3-2b|sandbox:Running|$((40 + r % 30))%"
   echo "studio|M|inkling-2-mini:latest|25.3"; echo "studio|M|cam-r3-2b:latest|1.1"
-  echo "studio|P|ollama|$((30 + r % 20)).0|25800"; echo "studio|P|claude|9.4|840"; echo "studio|P|WindowServer|6.1|122"
   echo "studio|S|landing-page|$(( t % 3 == 0 ? 40 : 2 ))|1|✳ Building hero section"
   echo "studio|S|local-refactor|840|0|✳ Refactor CLI arg parsing"
   echo "studio|T|10.0.0.3|1"; echo "studio|C|10.0.0.3|1"
@@ -165,7 +162,7 @@ probe_all() {  # → "host|H|..." and "host|S|..." lines, all hosts in parallel
   [ -n "${GWM_DEMO:-}" ] && { demo_probe; return; }
   local tmp; tmp="$(mktemp -d)"
   while IFS=$'\t' read -r h _; do
-    ( out="$(run_script "$h" "$PROBE" 2>/dev/null | grep -E '^[HSTCIMP]\|')"
+    ( out="$(run_script "$h" "$PROBE" 2>/dev/null | grep -E '^[HSTCIM]\|')"
       [ -n "$out" ] || out="DOWN"; printf '%s\n' "$out" | sed "s/^/$h|/" > "$tmp/$h" ) &
   done < <(hosts)
   wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
@@ -262,9 +259,11 @@ start_cmd() {  # the command that creates-or-attaches session <name> on its host
   local n="$1" e a f env="" prog
   e="$(sfield "$n" 3)"; a="$(sfield "$n" 4)"; f="$(sfield "$n" 5)"; [ -n "$f" ] || f="~"
   [ -n "$a" ] && [ "$a" != default ] && [ "$a" != - ] && env="-e CLAUDE_CONFIG_DIR=$ACCT_DIR/$a"
+  # Every session is just a terminal — nothing is launched for you. The engine only sets a hint (and the account).
+  local h; h="$(sfield "$n" 2)"
   case "$e" in
-    claude)   prog='claude; exec $SHELL -l' ;;
-    opencode) prog='opencode; exec $SHELL -l' ;;
+    claude)   prog="printf \"\\033[2mgo-with-me · $n on $h · for Claude Code (account: ${a:-default}) — type \\033[0;1mclaude\\033[0;2m when you want it\\033[0m\\n\\n\"; exec \$SHELL -l" ;;
+    opencode) prog="printf \"\\033[2mgo-with-me · $n on $h · for opencode (local models) — type \\033[0;1mopencode\\033[0;2m when you want it\\033[0m\\n\\n\"; exec \$SHELL -l" ;;
     shell)    prog='exec $SHELL -l' ;;
     *) die "session '$n': unknown engine '$e' (use claude, opencode or shell)" ;;
   esac
@@ -305,7 +304,7 @@ write_layout() {  # only sessions that are already running get a tab; others are
   { echo "layout {"; bars
     printf '  tab name="1 overview" focus=true {\n'
     if [ -n "${GWM_DEMO:-}" ]; then printf '    pane focus=true command="bash" { args "%s"; }\n  }\n' "$DIR/demo/coordinator.sh"
-    else printf '    pane focus=true command="claude" cwd="%s" start_suspended=true\n  }\n' "$DIR/coordinator"; fi
+    else printf '    pane focus=true command="%s" cwd="%s" { args "_shell" "coordinator"; }\n  }\n' "$ME" "$DIR/coordinator"; fi
     for n in $(running_sessions); do i=$((i+1)); tab_layout "$n" | sed "1s/tab name=\"$n\"/tab name=\"$i $n\"/"; done
     echo "}"; } > "$CFG/hub-layout.kdl"
 }
@@ -315,6 +314,9 @@ cmd_open() {
   [ "${ZELLIJ_SESSION_NAME:-}" = "$HUBNAME" ] && die "you're already inside the go-with-me hub"
   # don't leak this terminal's Claude Code session markers into the hub's Claude sessions
   for v in $(env | sed -n 's/^\(CLAUDECODE\|CLAUDE_CODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+  # Terminal.app gives each window a session id; passed into the hub, every new shell prints
+  # "Restored session: <date>" (and replays old history). The hub's terminals aren't Terminal.app windows.
+  unset TERM_SESSION_ID SHELL_SESSION_ID SHELL_SESSION_DID_INIT SHELL_SESSION_FILE
   if hub_running; then exec zellij attach "$HUBNAME"; fi
   zellij delete-session "$HUBNAME" >/dev/null 2>&1
   echo "Checking which sessions are running…"; write_layout
@@ -760,6 +762,9 @@ case "${1:-open}" in
   models) shift; cmd_models "$@" ;;  pull) shift; cmd_pull "$@" ;;  opencode-setup) shift; cmd_opencode_setup "$@" ;;
   discover) discover ;;
   _data) cmd_data ;;
+  _startcmd) need_session "$2"; start_cmd "$2" ;;
+  _shell) [ "${2:-}" = coordinator ] && printf '\033[38;5;209;1m✻ coordinator\033[0;2m — a terminal that can see every machine. Type \033[0;1mclaude\033[0;2m to ask it to summarise or delegate\n  (it reads coordinator/CLAUDE.md), or use gwm status · gwm peek · gwm send yourself.\033[0m\n\n'
+          exec "${SHELL:-/bin/zsh}" -l ;;
   sidebar) exec python3 "$DIR/sidebar.py" "$ME" ;;
   tailscale) cmd_tailscale ;;
   init) cmd_init "${2:-}" ;;  add) shift; cmd_add "$@" ;;  remove) [ $# -ge 2 ] || die "usage: gwm remove <machine>"; cmd_remove "$2" ;;  sync) [ $# -ge 2 ] || die "usage: gwm sync <host>"; cmd_sync "$2" ;;

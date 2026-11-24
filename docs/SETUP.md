@@ -120,8 +120,9 @@ Switching a Mac from Remote Login to Tailscale later? Run `gwm add <same-name> -
 gwm
 ```
 
-- **The sidebar** (left): *This Mac* in detail (CPU/GPU/RAM, busy with, every loaded model, VMs, who's connected, its sessions) and a compact card per other machine. Only running sessions are listed; click to jump
-- **Tab 1, the coordinator**: a Claude that can see and steer everything. It waits for you to press **Enter**, so it never starts a session you didn't ask for
+- **The sidebar** (left): *This Mac* in detail (CPU/GPU/RAM, every loaded model, VMs, who's connected, its sessions) and a compact card per other machine. Only running sessions are listed; click to jump
+- **Tab 1, the coordinator**: a terminal. Type `claude` there for an assistant that can see and steer everything
+- **Every tab is a plain terminal**: nothing is launched for you. A Claude-type tab shows a hint and has its account set up, so `claude` uses the right login
 - **Tabs 2, 3, …**: one per running session, numbered by position (shown in the sidebar)
 
 | | |
@@ -131,7 +132,7 @@ gwm
 | Leave (everything keeps running) | **Ctrl+g → o → d**, or just close the window |
 | Start / open / close sessions | `gwm new` · `gwm open <name>` · `gwm close <name>` |
 
-The first time a Claude tab opens, Claude asks whether to trust the folder. Pick **Yes**.
+The first time you run `claude` in a folder, it asks whether to trust it. Pick **Yes**.
 
 ## 6. Optional extras
 

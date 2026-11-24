@@ -3,8 +3,12 @@
 B=$'\033[1m'; D=$'\033[2m'; G=$'\033[32m'; Y=$'\033[33m'; C=$'\033[36m'; O=$'\033[38;5;209m'; R=$'\033[0m'
 type_out() { local s="$1" i; for ((i=0;i<${#s};i++)); do printf '%s' "${s:$i:1}"; sleep 0.03; done; echo; }
 clear
-printf '%s✻ Coordinator%s %s— sees every machine and session%s\n\n' "$O$B" "$R" "$D" "$R"
-sleep 2
+printf '%s✻ coordinator%s %s— a terminal that can see every machine. Type claude when you want it.%s\n\n' "$O$B" "$R" "$D" "$R"
+sleep 1.5
+printf '%s~/go-with-me/coordinator $%s ' "$D" "$R"; type_out "claude"
+sleep 1
+printf '\n%s✻ Claude Code%s %s· coordinator%s\n\n' "$O$B" "$R" "$D" "$R"
+sleep 1
 printf '%s❯%s ' "$C" "$R"; type_out "summarise everything"
 sleep 0.8
 printf '  %s⏺ gwm status · gwm peek landing-page · gwm peek api-tests · gwm peek load-test%s\n\n' "$D" "$R"; sleep 1.2

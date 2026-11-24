@@ -4,7 +4,7 @@
 Layout, grouped by what belongs together:
   header
   coordinator                       (the overview tab)
-  MACHINES — one card per machine:  status · CPU/RAM · models · VMs · who's using it,
+  THIS MAC — CPU/GPU/RAM, every loaded model, VMs, who's using it, its sessions;  OTHER MACHINES — compact cards,
                                     then that machine's sessions
   actions                           new · close · refresh · help
   details of the highlighted session
@@ -53,11 +53,10 @@ def load_data():
             d = probe.setdefault(h, {"up": False, "sessions": {}})
             if kind == "H":
                 p += [""] * 7
-                d.update(up=True, cpu=p[2], ram=p[3], models=p[4], vms=p[5], gpu=p[6], mlist=d.get("mlist", []), top=d.get("top", []))
+                d.update(up=True, cpu=p[2], ram=p[3], models=p[4], vms=p[5], gpu=p[6], mlist=d.get("mlist", []))
             elif kind == "M" and len(p) >= 4:
                 d.setdefault("mlist", []).append((p[2].replace(":latest", ""), p[3], p[4] if len(p) > 4 else ""))
-            elif kind == "P" and len(p) >= 5:
-                d.setdefault("top", []).append((p[2], p[3], p[4]))
+
             elif kind == "S" and len(p) >= 6:
                 d["sessions"][p[2]] = {"idle": int(p[3] or 0), "att": int(p[4] or 0), "title": p[5]}
     with lock:
@@ -204,12 +203,6 @@ def build():
                 if val is None and label == "GPU":
                     continue
                 add([(3, label, "dim"), (8, bar(val), level(val)), (19, shown, "normal")])
-            top = hp.get("top") or []
-            if top:
-                add()
-                add([(3, "busy with", "dim")])
-                for name, cpu, mem in top[:3]:
-                    add([(5, name[:18], "normal"), (-1, f"{float(cpu):.0f}%", "dim")])
             mlist = hp.get("mlist") or []
             add()
             if mlist:

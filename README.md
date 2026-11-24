@@ -21,7 +21,7 @@ git clone https://github.com/Vayras/go-with-me && cd go-with-me && ./go-with-me 
 <td width="50%"><img src="docs/session-tab.png" alt="A session"></td>
 </tr>
 <tr>
-<td><b>Just a sidebar and a terminal.</b> <b>This Mac</b> gets a full card: CPU / GPU / RAM bars, what it's busy with, <b>every loaded model</b> and its size, VMs, which other devices are using it, and its running sessions. <b>Other machines</b> get compact cards with their models and sessions. Only sessions that are <i>running</i> are listed; saved ones collapse to one line. Tab 1 is the <b>coordinator</b>, a Claude that starts when you press Enter.</td>
+<td><b>Just a sidebar and a terminal.</b> <b>This Mac</b> gets a full card: CPU / GPU / RAM bars, <b>every loaded model</b> and its size, VMs, which other devices are using it, and its running sessions. <b>Other machines</b> get compact cards with their models and sessions. Only sessions that are <i>running</i> are listed; saved ones collapse to one line. Tab 1 is the <b>coordinator</b>: a terminal where typing <code>claude</code> gives you an assistant that can see and steer every machine.</td>
 <td><b>Click a session to jump in</b> (a stopped one starts). Each session runs on its own machine and <b>keeps running</b> when you close your laptop. <b>Alt+1…9</b> also jumps; <b>n</b> new, <b>x</b> close. Select text with the mouse to copy it.</td>
 </tr>
 </table>
@@ -31,8 +31,8 @@ A **session** is *machine + engine + account + folder*:
 | | |
 |---|---|
 | **Machines** | Any Mac (or Linux box), connected over [Tailscale](https://tailscale.com) (works anywhere, no Remote Login) or plain SSH with Remote Login |
-| **Engines** | `claude` (Claude Code), `opencode` (local models via [Ollama](https://ollama.com), no cloud tokens), `shell` |
-| **Accounts** | Several Claude logins side by side, e.g. `personal` on one tab and `work` on another, each fully separate |
+| **Terminals, not auto-launched apps** | Every tab is a plain terminal; **nothing starts on its own**. A session's engine (`claude`, `opencode` with local [Ollama](https://ollama.com) models, or `shell`) just labels what it's for and shows a hint; you type `claude` / `opencode` when you want it |
+| **Accounts** | Several Claude logins side by side: in a `work` tab, typing `claude` uses your work login, and in a `personal` tab your personal one |
 | **VMs** | `gwm vm create sandbox --on studio` makes a Linux VM ([Lima](https://lima-vm.io)) on your strongest machine; it shows up as a machine with its own sessions |
 
 <img src="docs/status.png" alt="gwm status" width="100%">
@@ -100,7 +100,7 @@ Plain bash, no daemon or server:
 - Each session lives in a **hidden tmux** on its own machine (no status bar, no prefix key; it's only there so sessions survive disconnects). Tabs reconnect to it over **SSH**.
 - The sidebar's data comes from one shared SSH sweep of every machine (cached a few seconds): CPU/RAM, Ollama's loaded models, Lima VMs, tmux sessions, and incoming SSH/Tailscale connections (that's **in use**).
 - **Accounts** = a separate `CLAUDE_CONFIG_DIR` per label on each machine.
-- The **coordinator** is a normal Claude Code session with instructions to use `gwm status / peek / send / run`. It asks before sending to a session or changing anything.
+- The **coordinator** tab is a terminal in `coordinator/`; when you run `claude` there it reads `CLAUDE.md` and uses `gwm status / peek / send / run`. It asks before sending to a session or changing anything.
 
 ## Similar projects
 

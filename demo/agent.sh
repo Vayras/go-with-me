@@ -16,6 +16,8 @@ case "$n" in
 esac
 printf '\033]2;✳ %s\007' "$title"
 clear
+case "$eng" in Claude*) cmd=claude;; opencode*) cmd=opencode;; *) cmd="";; esac
+if [ -n "$cmd" ]; then printf '%s%s $%s ' "$D" "${n}" "$R"; sleep 0.6; printf '%s\n\n' "$cmd"; sleep 0.6; fi
 printf '%s╭──────────────────────────────────────────────────────────╮%s\n' "$O" "$R"
 printf '%s│%s %s✻ %s%-52s %s│%s\n' "$O" "$R" "$O" "$B" "$title" "$O" "$R"
 printf '%s│%s %s%-56s%s %s│%s\n' "$O" "$R" "$D" "$eng" "$R" "$O" "$R"
