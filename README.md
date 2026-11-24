@@ -33,6 +33,7 @@ A **session** is *machine + engine + account + folder*:
 | **Machines** | Any Mac (or Linux box), connected over [Tailscale](https://tailscale.com) (works anywhere, no Remote Login) or plain SSH with Remote Login |
 | **Terminals, not auto-launched apps** | Every tab is a plain terminal; **nothing starts on its own**. A session's engine (`claude`, `opencode` with local [Ollama](https://ollama.com) models, or `shell`) just labels what it's for and shows a hint; you type `claude` / `opencode` when you want it |
 | **Accounts** | Several Claude logins side by side: in a `work` tab, typing `claude` uses your work login, and in a `personal` tab your personal one |
+| **Web** | The same hub in a browser on any of your Tailscale devices (`gwm web`): same sidebar, same terminals, same keys. Tailnet-only HTTPS plus a login token |
 | **VMs** | `gwm vm create sandbox --on studio` makes a Linux VM ([Lima](https://lima-vm.io)) on your strongest machine; it shows up as a machine with its own sessions |
 
 <img src="docs/status.png" alt="gwm status" width="100%">
@@ -70,9 +71,26 @@ gwm             # open the hub
 | Linux VMs | `gwm vm create <name> --on <machine> [--cpus 6 --memory 16]` · `gwm vm list` |
 | Local models | `gwm models --on studio` · `gwm pull <model>` · `gwm opencode-setup --on studio` |
 | Copy text | Select it with the mouse; it's copied automatically. Paste with Cmd+V |
+| Open the hub in a browser (your tailnet only) | `gwm web` · `gwm web stop` · `gwm web token` |
 | Leave the hub (everything keeps running) | **Ctrl+g → o → d**, or close the window |
 
 **In the hub:** the **sidebar** (left) lists every machine and session: click to jump, **n** new, **x** close, **?** help. Click tabs and panes with the mouse; select text to copy. Keys go straight to Claude or opencode until you press **Ctrl+g**; the bottom bar then shows what each key does. **Alt+1…9** and **Alt+←/→** switch tabs at any time (Terminal.app: enable *Use Option as Meta key*).
+
+## Web access
+
+```bash
+gwm web            # prints https://<this-mac>.<tailnet>.ts.net:8443/gwm and, the first time, a login token
+gwm web stop       # stop sharing (your hub and sessions keep running)
+```
+
+It's the same hub (sidebar + terminals) through [Zellij's web client](https://zellij.dev), with four layers of protection:
+
+1. **Local only.** The web server listens on `127.0.0.1`, so nothing on your Wi-Fi or the internet can connect to it. `gwm web` refuses to continue if it's ever bound wider.
+2. **Your tailnet only.** [Tailscale Serve](https://tailscale.com/kb/1312/serve) publishes it over HTTPS with a real `*.ts.net` certificate to *your* devices. It's Serve, not Funnel, so it's never on the public internet.
+3. **Login token.** Every browser logs in with a token (`gwm web token`). Use `--read-only` for watch-only access, and `gwm web revoke <name>` revokes one; revoking also logs out browsers already using it.
+4. **Only the hub is shared.** Web sharing is enabled for the go-with-me hub, not for your other terminal sessions.
+
+A token is a terminal on that Mac, so treat it like a password. One-time setup: turn on **HTTPS Certificates** in your [Tailscale DNS settings](https://login.tailscale.com/admin/dns).
 
 ## Config
 
