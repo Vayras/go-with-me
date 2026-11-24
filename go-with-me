@@ -35,7 +35,10 @@
 #   gwm pull <model> [--on host]      download a model
 #   gwm opencode-setup [--on host] [--model name]   point opencode at that host's Ollama
 # Setup
-#   gwm init <this-host-name>         one-time: create config, say which host this machine is
+#   gwm init [name]                   one-time on each machine: name it and create its config
+#   gwm add                           add another machine: finds it, sets up SSH keys both ways,
+#                                     installs tmux + go-with-me there, adds a tab (guided)
+#   gwm remove <machine>              remove a machine from your config
 #   gwm sync <host>                   copy hosts/sessions config from another host
 #   gwm edit                          open the config files in your editor
 
@@ -457,14 +460,177 @@ PY"
 }
 
 # ---------- setup ----------
+HOSTS_HEADER='# go-with-me machines:  name | ssh target | role      (add more with: gwm add)
+#   ssh target: user@address — a Tailscale name works from anywhere; a .local name works on the same Wi-Fi.
+#   Lima VMs look like vm:<machine>/<vm-name> (gwm vm create adds them).'
+SESSIONS_HEADER='# go-with-me sessions (tabs):  name | machine | engine | account | folder
+#   engine: claude | opencode | shell     account: default, or any label (gwm login <label> --on <machine>)
+#   gwm new / gwm close edit this file for you.'
+
+my_address() {  # best address other machines can use to reach this one
+  local ts; ts="$(tailscale status --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)"
+  if [ -n "$ts" ]; then echo "$ts"; else echo "$(scutil --get LocalHostName 2>/dev/null || hostname -s).local"; fi
+}
+ensure_key() {  # make sure this machine has an SSH key; print the public key
+  [ -f "$HOME/.ssh/id_ed25519.pub" ] || { mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" &&
+    ssh-keygen -q -t ed25519 -N "" -C "go-with-me@$(self_name)" -f "$HOME/.ssh/id_ed25519"; }
+  cat "$HOME/.ssh/id_ed25519.pub"
+}
+upsert_host() {  # upsert_host name target role
+  awk -F'|' -v n="$1" '{v=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$HOSTS" > "$HOSTS.new"
+  printf '%-10s| %-40s| %s\n' "$1" "$2" "$3" >> "$HOSTS.new"; mv "$HOSTS.new" "$HOSTS"
+}
 cmd_init() {
-  local n="${1:-}"; [ -n "$n" ] || die "usage: gwm init <this-host-name>"
+  local n="${1:-}"
+  [ -n "$n" ] || n="$(ask "Name for this machine (short, e.g. studio, macbook)" "$(scutil --get LocalHostName 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g' | cut -c1-20)")"
+  [[ "$n" =~ ^[A-Za-z0-9_-]+$ ]] || die "name: letters, digits, - and _ only"
   mkdir -p "$CFG/accounts"
-  [ -f "$HOSTS" ]    || cp "$DIR/examples/hosts.conf" "$HOSTS"
-  [ -f "$SESSIONS" ] || cp "$DIR/examples/sessions.conf" "$SESSIONS"
+  [ -f "$HOSTS" ]    || printf '%s\n\n' "$HOSTS_HEADER" > "$HOSTS"
+  [ -f "$SESSIONS" ] || printf '%s\n\n' "$SESSIONS_HEADER" > "$SESSIONS"
   echo "$n" > "$SELF_FILE"
-  hfield "$n" 1 >/dev/null 2>&1 || echo "Note: '$n' isn't in $HOSTS yet — add a line for it (gwm edit)."
-  echo "This machine is '$n'. Config: $CFG"
+  if ! hfield "$n" 1 >/dev/null 2>&1; then
+    local ram; ram="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
+    upsert_host "$n" "$(whoami)@$(my_address)" "$(sysctl -n hw.model 2>/dev/null || uname -s), ${ram}GB"
+  fi
+  sfield "$n" 1 >/dev/null 2>&1 || printf '%-14s| %-8s| %-9s| %-8s| %s\n' "$n" "$n" claude default "~" >> "$SESSIONS"
+  ensure_key >/dev/null
+  echo "$(c 32)✓$(c 0) This machine is '$n' ($(whoami)@$(my_address)). Config: $CFG"
+  echo "  Next: add your other machines with  $(c 1)gwm add$(c 0)   ·   then open the hub with  $(c 1)gwm$(c 0)"
+}
+
+# ---------- adding machines ----------
+discover() {  # print "address<TAB>description" for machines we can see: Tailscale peers + Macs on this Wi-Fi with Remote Login on
+  tailscale status --json 2>/dev/null | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+for p in (d.get("Peer") or {}).values():
+    name = p.get("DNSName", "").rstrip(".")
+    if name: print(f"{name}\tTailscale · {p.get(\"OS\",\"?\")} · {\"online\" if p.get(\"Online\") else \"offline\"}")' 2>/dev/null
+  local mine; mine="$(scutil --get LocalHostName 2>/dev/null)"
+  perl -e 'alarm 3; exec @ARGV' dns-sd -B _ssh._tcp local. 2>/dev/null | awk 'NR>4 && $2=="Add" {$1=$2=$3=$4=$5=$6=""; sub(/^ +/,""); print}' | sort -u |
+  while IFS= read -r inst; do
+    ( perl -e 'alarm 3; exec @ARGV' dns-sd -L "$inst" _ssh._tcp local. 2>/dev/null | grep -o 'reached at [^ ]*' | head -1 |
+        awk -v i="$inst" '{h=$3; sub(/:[0-9]+$/,"",h); sub(/\.$/,"",h); printf "%s\tsame Wi-Fi · %s\n", h, i}' ) &
+  done | grep -v "^$mine\.local" ; wait
+}
+cmd_add() {
+  local n="" addr="" user="" role="" yes=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --address) addr="$2"; shift 2;; --user) user="$2"; shift 2;; --role) role="$2"; shift 2;; -y|--yes) yes=1; shift;;
+    *) n="$1"; shift;; esac; done
+  [ -n "$(self_name)" ] || die "run 'gwm init' on this machine first"
+  local me mytarget; me="$(self_name)"; mytarget="$(hfield "$me" 2)"
+  echo "$(c 1)Add a machine to go-with-me$(c 0)"
+
+  # 1. where is it?
+  if [ -z "$addr" ]; then
+    echo "Looking for machines (Tailscale + this Wi-Fi)…"
+    local found; found="$(discover)"
+    if [ -n "$found" ]; then
+      printf '%s\n' "$found" | awk -F'\t' '{printf "  %d) %-40s %s\n", NR, $1, $2}'
+      local pick; pick="$(ask "Pick a number, or type an address" 1)"
+      if [[ "$pick" =~ ^[0-9]+$ ]]; then addr="$(printf '%s\n' "$found" | sed -n "${pick}p" | cut -f1)"; else addr="$pick"; fi
+    else
+      echo "  (nothing found — type its Tailscale name, its .local name, or its IP)"
+      addr="$(ask "Address" "")"
+    fi
+  fi
+  [ -n "$addr" ] || die "no address given"
+  addr="${addr#*@}"
+
+  # 2. can we reach it at all?
+  if ! nc -z -G 4 "$addr" 22 >/dev/null 2>&1; then
+    echo "$(c 31)✗$(c 0) $addr isn't accepting SSH connections."
+    echo "  On that Mac: System Settings → General → Sharing → turn on $(c 1)Remote Login$(c 0), then run gwm add again."
+    echo "  (If it's away from home, both Macs need Tailscale — see docs/SETUP.md.)"; exit 1
+  fi
+  echo "$(c 32)✓$(c 0) $addr is reachable"
+
+  # 3. which user?
+  [ -n "$user" ] || { [ -n "$yes" ] && user="$(whoami)"; } || true
+  [ -n "$user" ] || user="$(ask "Your username on that Mac (run 'whoami' there if unsure)" "$(whoami)")"
+  local t="$user@$addr"
+  local sshq=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 -o LogLevel=ERROR)
+
+  # 4. keys: this machine → it
+  ensure_key >/dev/null
+  if ! "${sshq[@]}" "$t" true 2>/dev/null; then
+    echo "This Mac's key isn't trusted there yet. Copying it now — enter $(c 1)$user's password on $addr$(c 0) once:"
+    ssh-copy-id -o StrictHostKeyChecking=accept-new -i "$HOME/.ssh/id_ed25519.pub" "$t" >/dev/null 2>&1 </dev/tty || true
+    if ! "${sshq[@]}" "$t" true 2>/dev/null; then
+      echo "$(c 31)✗$(c 0) Still can't log in as '$user'. Common causes:"
+      echo "  • wrong username — run 'whoami' on that Mac and try: gwm add --user <name> --address $addr"
+      echo "  • Remote Login limited to some users — Sharing → Remote Login → ⓘ → Allow access for: All users"; exit 1
+    fi
+  fi
+  echo "$(c 32)✓$(c 0) Logged in as $user"
+
+  # 5. what is it?
+  local info; info="$(run_script_target "$t" 'echo "host=$(scutil --get LocalHostName 2>/dev/null || hostname -s)"; echo "os=$(sw_vers -productVersion 2>/dev/null || uname -sr)"
+    echo "ram=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"; echo "model=$(sysctl -n hw.model 2>/dev/null || uname -m)"
+    for x in brew tmux zellij claude opencode ollama limactl tailscale; do command -v $x >/dev/null && echo "has=$x"; done')"
+  local rhost ros rram rmodel; rhost="$(sed -n 's/^host=//p' <<<"$info")"; ros="$(sed -n 's/^os=//p' <<<"$info")"
+  rram="$(sed -n 's/^ram=//p' <<<"$info")"; rmodel="$(sed -n 's/^model=//p' <<<"$info")"
+  has() { grep -qx "has=$1" <<<"$info"; }
+  printf "$(c 32)✓$(c 0) %s · %s · %sGB · " "$rhost" "$ros" "$rram"
+  for x in tmux claude opencode ollama; do has $x && printf "%s ✓ " "$x" || printf "$(c 2)%s ✗$(c 0) " "$x"; done; echo
+  if ! has tmux; then
+    if has brew && { [ -n "$yes" ] || [ "$(ask "tmux is needed to keep sessions running there. Install it now? (y/n)" y)" = y ]; }; then
+      run_script_target "$t" 'brew install tmux >/dev/null 2>&1 && echo ok' | grep -q ok && echo "$(c 32)✓$(c 0) installed tmux" || echo "$(c 33)•$(c 0) couldn't install tmux — run 'brew install tmux' there"
+    else echo "$(c 33)•$(c 0) install tmux there (brew install tmux) before opening sessions on it"; fi
+  fi
+
+  # 6. name + save
+  [ -n "$n" ] || n="$(ask "Short name for it" "$(echo "$rhost" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g' | sed 's/^.*s-//' | cut -c1-20)")"
+  [[ "$n" =~ ^[A-Za-z0-9_-]+$ ]] || die "name: letters, digits, - and _ only"
+  [ "$n" = "$me" ] && die "'$n' is this machine's name — pick another"
+  [ -n "$role" ] || role="$rmodel, ${rram}GB"
+  upsert_host "$n" "$t" "$role"
+  echo "$(c 32)✓$(c 0) Saved as '$n' → $t"
+
+  # 7. the other direction: it → this machine (for gwm on that machine, and its board)
+  local rkey; rkey="$(run_script_target "$t" '[ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -q -t ed25519 -N "" -C "go-with-me@'"$n"'" -f ~/.ssh/id_ed25519; cat ~/.ssh/id_ed25519.pub')"
+  if [ -n "$rkey" ]; then
+    mkdir -p "$HOME/.ssh"; touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"
+    grep -qF "$rkey" "$HOME/.ssh/authorized_keys" || echo "$rkey" >> "$HOME/.ssh/authorized_keys"
+    if run_script_target "$t" "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 -o LogLevel=ERROR $mytarget true && echo back-ok" 2>/dev/null | grep -q back-ok; then
+      echo "$(c 32)✓$(c 0) '$n' can reach this Mac too"
+    else
+      echo "$(c 33)•$(c 0) '$n' can't reach this Mac yet — turn on Remote Login here (System Settings → General → Sharing)"
+    fi
+  fi
+
+  # 8. install go-with-me there with the same config
+  if [ -n "$yes" ] || [ "$(ask "Install go-with-me on '$n' too, so you can open the hub from there? (y/n)" y)" = y ]; then
+    rsync -a --delete --exclude .DS_Store -e "ssh -o BatchMode=yes -o LogLevel=ERROR" "$DIR/" "$t:go-with-me/" &&
+    run_script_target "$t" "mkdir -p ~/.config/go-with-me/accounts" &&
+    scp -q -o BatchMode=yes "$HOSTS" "$SESSIONS" "$t:.config/go-with-me/" &&
+    run_script_target "$t" "~/go-with-me/install.sh >/dev/null && echo $n > ~/.config/go-with-me/self && echo ok" | grep -q ok &&
+      echo "$(c 32)✓$(c 0) go-with-me installed on '$n' (run gwm there)" || echo "$(c 33)•$(c 0) couldn't install go-with-me there — see docs/SETUP.md"
+    # keep every other machine's copy of the config in sync
+    while IFS=$'\t' read -r h ht _; do
+      [ "$h" = "$me" ] || [ "$h" = "$n" ] && continue; case "$ht" in vm:*) continue;; esac
+      scp -q -o BatchMode=yes -o ConnectTimeout=4 "$HOSTS" "$SESSIONS" "$ht:.config/go-with-me/" 2>/dev/null
+    done < <(hosts)
+  fi
+
+  # 9. a tab for it
+  if ! sessions | awk -F'\t' -v h="$n" '$2==h{f=1} END{exit !f}'; then
+    if [ -n "$yes" ] || [ "$(ask "Add a Claude Code tab on '$n'? (y/n)" y)" = y ]; then
+      printf '%-14s| %-8s| %-9s| %-8s| %s\n' "$n" "$n" claude default "~" >> "$SESSIONS"; echo "$(c 32)✓$(c 0) Added session '$n'"
+    fi
+  fi
+  echo; echo "Done — '$n' is on your board.  gwm status  ·  gwm  ·  gwm open $n"
+}
+run_script_target() {  # like run_script, but for a raw user@address that isn't saved yet
+  printf '%s\n%s\n' "$PATHFIX" "$2" | ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 -o LogLevel=ERROR "$1" 'exec "$SHELL" -l -s'
+}
+cmd_remove() {
+  local n="${1:-}"; [ -n "$n" ] || die "usage: gwm remove <machine>"; need_host "$n"
+  [ "$n" = "$(self_name)" ] && die "can't remove this machine"
+  awk -F'|' -v n="$n" '{v=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$HOSTS" > "$HOSTS.new" && mv "$HOSTS.new" "$HOSTS"
+  awk -F'|' -v n="$n" '{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$SESSIONS" > "$SESSIONS.new" && mv "$SESSIONS.new" "$SESSIONS"
+  echo "$(c 32)✓$(c 0) Removed '$n' and its sessions from this machine's config (nothing on '$n' was changed)."
 }
 cmd_sync() { local h="$1"; need_host "$h"
   for f in hosts.conf sessions.conf; do run_script "$h" "cat ~/.config/go-with-me/$f" > "$CFG/$f.new" && mv "$CFG/$f.new" "$CFG/$f"; done
@@ -487,7 +653,8 @@ case "${1:-open}" in
   accounts) shift; cmd_accounts "$@" ;;  login) shift; cmd_login "$@" ;;
   vm) shift; cmd_vm "$@" ;;
   models) shift; cmd_models "$@" ;;  pull) shift; cmd_pull "$@" ;;  opencode-setup) shift; cmd_opencode_setup "$@" ;;
-  init) cmd_init "${2:-}" ;;  sync) [ $# -ge 2 ] || die "usage: gwm sync <host>"; cmd_sync "$2" ;;
+  discover) discover ;;
+  init) cmd_init "${2:-}" ;;  add) shift; cmd_add "$@" ;;  remove) [ $# -ge 2 ] || die "usage: gwm remove <machine>"; cmd_remove "$2" ;;  sync) [ $# -ge 2 ] || die "usage: gwm sync <host>"; cmd_sync "$2" ;;
   edit) ${EDITOR:-nano} "$HOSTS" "$SESSIONS" ;;
   -h|--help|help) awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$ME" ;;
   *) die "unknown command '$1' (gwm help)" ;;

@@ -44,13 +44,12 @@ A **session** is *machine + engine + account + folder*:
 ```bash
 brew install zellij tmux
 git clone https://github.com/Vayras/go-with-me ~/go-with-me && ~/go-with-me/install.sh   # adds `gwm`
-gwm init studio        # name this machine; creates ~/.config/go-with-me
-gwm edit               # list your machines and sessions (examples inside)
-gwm doctor             # checks every machine is reachable and what's installed
-gwm                    # open the hub
+gwm init        # name this Mac
+gwm add         # add your other Macs: finds them, sets up SSH keys both ways, installs everything there
+gwm             # open the hub
 ```
 
-Every other machine needs: **Remote Login** on (System Settings → General → Sharing), this machine's SSH key in its `~/.ssh/authorized_keys` (`ssh-copy-id you@that-mac`), and `tmux`.
+Each other Mac only needs **Remote Login** turned on (System Settings → General → Sharing) and Homebrew. **📖 Full guide, Tailscale for away-from-home and troubleshooting: [docs/SETUP.md](docs/SETUP.md)**
 
 ## Everyday use
 
@@ -63,6 +62,7 @@ Every other machine needs: **Remote Login** on (System Settings → General → 
 | Stop it but keep the tab (Enter in the tab restarts it) | `gwm stop <session>` |
 | See everything at a glance / who's using what | `gwm status` · `gwm who` |
 | Read or type into a session from anywhere | `gwm peek <session>` · `gwm send <session> "text"` |
+| Add / remove a machine | `gwm add` · `gwm remove <machine>` |
 | Run a command on a machine | `gwm run <machine> "git status"` |
 | Sign a Claude account in on a machine | `gwm login work --on studio` |
 | Linux VMs | `gwm vm create <name> --on <machine> [--cpus 6 --memory 16]` · `gwm vm list` |
@@ -87,7 +87,7 @@ site          | studio  | claude   | default | ~/code/site
 work-api      | studio  | claude   | work    | ~/work/api
 local         | studio  | opencode | -       | ~/code
 ```
-`gwm new` / `gwm close` edit this for you. `gwm sync <machine>` copies the config from another machine.
+`gwm init`, `gwm add`, `gwm new` and `gwm close` edit these for you, and `gwm add` copies them to your other machines.
 
 ## How it works
 
