@@ -64,6 +64,7 @@ gwm             # open the hub
 | Stop it but keep the tab (Enter in the tab restarts it) | `gwm stop <session>` |
 | See everything at a glance / who's using what | `gwm status` · `gwm who` |
 | Read or type into a session from anywhere | `gwm peek <session>` · `gwm send <session> "text"` |
+| Read a session's whole Claude conversation (the coordinator does this for every chat by default) | `gwm history <session>` · `gwm history --all` |
 | Add / remove a machine | `gwm add [--via tailscale\|ssh]` · `gwm remove <machine>` |
 | Set up Tailscale on this Mac | `gwm tailscale` |
 | Run a command on a machine | `gwm run <machine> "git status"` |

@@ -23,6 +23,7 @@
 #   gwm sessions                      list sessions
 #   gwm peek <session> [lines]        show a session's screen
 #   gwm send <session> <text...>      type text + Enter into a session
+#   gwm history <session>|--all [n]   the session's Claude conversation (last n messages, from its machine)
 #   gwm attach <session>              connect to a session in this terminal (what each tab runs)
 # Machines
 #   gwm hosts                         list machines
@@ -396,6 +397,16 @@ cmd_peek() { local n="$1" k="${2:-40}"; need_session "$n"
   run_script "$(sfield "$n" 2)" "tmux capture-pane -p -J -t $PFX$n -S -$k 2>/dev/null | awk 'NF{p=NR} {l[NR]=\$0} END{for(i=1;i<=p;i++) print l[i]}' || echo '(session $n is not running)'"; }
 cmd_send() { local n="$1"; shift; need_session "$n"
   run_script "$(sfield "$n" 2)" "printf %s $(b64 "$*") | base64 -d | tmux load-buffer -b gwm - && tmux paste-buffer -d -b gwm -t $PFX$n && sleep 0.3 && tmux send-keys -t $PFX$n Enter && echo 'sent to $n'"; }
+cmd_history() {  # gwm history <session>|--all [lines]: the session's Claude conversation, from the machine it runs on
+  local n="${1:-}" k="${2:-40}"; [ -n "$n" ] || die "usage: gwm history <session>|--all [lines]"
+  if [ "$n" = --all ]; then
+    sessions | awk -F'\t' '$3=="claude"{print $1}' | while read -r x; do cmd_history "$x" "$k"; echo; echo "────────"; done; return
+  fi
+  need_session "$n"
+  local a f cfgdir; a="$(sfield "$n" 4)"; f="$(sfield "$n" 5)"; [ -n "$f" ] || f="~"
+  if [ -n "$a" ] && [ "$a" != default ] && [ "$a" != - ]; then cfgdir="\$HOME/.config/go-with-me/accounts/$a"; else cfgdir="\$HOME/.claude"; fi
+  run_script "$(sfield "$n" 2)" "printf %s $(base64 < "$DIR/history.py" | tr -d '\n') | base64 -d > \${TMPDIR:-/tmp}/gwm-history.py && python3 \${TMPDIR:-/tmp}/gwm-history.py '$n' '$k' \"$f\" \"$cfgdir\""
+}
 cmd_stop() { local n="$1"; need_session "$n"
   run_script "$(sfield "$n" 2)" "tmux kill-session -t $PFX$n 2>/dev/null; echo 'stopped $n — its tab stays; press Enter there to start it fresh'"; }
 cmd_who() {  # who is using which machine right now
@@ -840,6 +851,7 @@ case "${1:-open}" in
   open) if [ $# -ge 2 ]; then cmd_open_session "$2"; else cmd_open; fi ;;  board) cmd_board ;;  status) print_table ;;
   kill) zellij kill-session "$HUBNAME" >/dev/null 2>&1; zellij delete-session "$HUBNAME" >/dev/null 2>&1; echo "Hub closed. Sessions keep running on their machines." ;;
   who) cmd_who ;;
+  history) shift; cmd_history "$@" ;;
   new) shift; cmd_new "$@" ;;
   close) shift; cmd_close "$@" ;;
   stop|restart) [ $# -ge 2 ] || die "usage: gwm stop <session>"; cmd_stop "$2" ;;
