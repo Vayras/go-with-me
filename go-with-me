@@ -1,24 +1,29 @@
 #!/bin/bash
 # go-with-me — one terminal for all your machines, accounts, VMs and models.
 #
-#   Tab 0 "overview": live board of every host + session, and a coordinator Claude that can see/steer them all.
-#   Tab 1..N: one per session. A session = a host + an engine (claude | opencode | shell) + an account + a folder.
-#   Sessions live in tmux on their host, so they keep running when you disconnect.
+#   "overview" tab: live board of every machine + session, and a coordinator Claude that can see/steer them all.
+#   One tab per session. A session = a machine + an engine (claude | opencode | shell) + an account + a folder.
+#   Sessions keep running on their machine when you disconnect. The hub runs in Zellij (shortcuts shown on screen).
 #
 # Hub
-#   gwm                               open the hub (or re-attach)
+#   gwm                               open the hub (or re-attach). Only running sessions get a tab.
 #   gwm status | board                one-shot status / live board
+#   gwm who                           which other devices are using each machine right now
 #   gwm kill                          close the hub (sessions keep running)
+#   gwm demo                          try it: the hub with pretend machines (no setup needed)
 # Sessions
+#   gwm new [name] [--on machine] [--engine e] [--account a] [--folder f]   start a session (asks what's missing)
+#   gwm open <session>                open a tab for a session that isn't running/open yet (starts it)
+#   gwm close <session> [--yes]       stop a session and remove its tab
+#   gwm stop <session>                stop what's running but keep the tab (Enter in the tab restarts it)
 #   gwm sessions                      list sessions
-#   gwm attach <session>              connect to a session (what each tab runs)
 #   gwm peek <session> [lines]        show a session's screen
 #   gwm send <session> <text...>      type text + Enter into a session
-#   gwm restart <session>             kill and restart a session
-# Hosts
-#   gwm hosts                         list hosts
-#   gwm run <host> <command...>       run a shell command on a host
-#   gwm doctor                        check every host is reachable and ready
+#   gwm attach <session>              connect to a session in this terminal (what each tab runs)
+# Machines
+#   gwm hosts                         list machines
+#   gwm run <host> <command...>       run a shell command on a machine
+#   gwm doctor                        check every machine is reachable and ready
 # Accounts (separate Claude logins, e.g. personal + work)
 #   gwm accounts [--on host]          show which account is logged in where
 #   gwm login <account> [--on host]   sign an account in on a host
@@ -40,8 +45,13 @@ case "$SCRIPT" in /*) ;; *) SCRIPT="$(cd "$(dirname "$0")" && pwd)/$(basename "$
 DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
 ME="$DIR/go-with-me"
 CFG="${GWM_CONFIG:-$HOME/.config/go-with-me}"
+if [ "${1:-}" = demo ]; then   # `gwm demo`: the real hub with pretend machines — no SSH, no logins, nothing real touched
+  export GWM_DEMO=1 GWM_HUB=gwm-demo GWM_CONFIG="${TMPDIR:-/tmp}/go-with-me-demo"
+  rm -rf "$GWM_CONFIG"; mkdir -p "$GWM_CONFIG"; cp "$DIR/demo/hosts.conf" "$DIR/demo/sessions.conf" "$GWM_CONFIG/"; echo studio > "$GWM_CONFIG/self"
+  CFG="$GWM_CONFIG"; shift; [ $# -gt 0 ] || set -- open   # `gwm demo status` etc. also work on the pretend data
+fi
 HOSTS="$CFG/hosts.conf"; SESSIONS="$CFG/sessions.conf"; SELF_FILE="$CFG/self"
-SOCK=gwm; HUB=hub; PFX=gwm-
+PFX=gwm-
 ACCT_DIR='$HOME/.config/go-with-me/accounts'   # expanded on the target host
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
@@ -66,24 +76,27 @@ is_local() { [ "$1" = "$(self_name)" ]; }
 
 # ---------- running things on hosts ----------
 # run_script <host> <script>   non-interactive; works for this machine, SSH hosts and Lima VMs
+PATHFIX='export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"'
 run_script() {
-  local h="$1" s="$2" t; t="$(hfield "$h" 2)"
+  [ -n "${GWM_DEMO:-}" ] && return 0
+  local h="$1" s="$PATHFIX
+$2" t; t="$(hfield "$h" 2)"
   case "$t" in
     vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
           run_script "$parent" "limactl shell --workdir / $vm -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
     *) if is_local "$h"; then printf '%s\n' "$s" | env -u TMUX "${SHELL:-/bin/zsh}" -l -s
-       else printf '%s\n' "$s" | ssh -o BatchMode=yes -o ConnectTimeout=4 -o ServerAliveInterval=5 \
+       else printf '%s\n' "$s" | ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=4 -o ServerAliveInterval=5 \
               -o ServerAliveCountMax=2 -o LogLevel=ERROR "$t" 'exec "$SHELL" -l -s'; fi ;;
   esac
 }
 # run_tty <host> <command>   interactive (needs a terminal)
 run_tty() {
-  local h="$1" s="$2" t; t="$(hfield "$h" 2)"
+  local h="$1" s="$PATHFIX; $2" t; t="$(hfield "$h" 2)"
   case "$t" in
     vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
           run_tty "$parent" "limactl shell --workdir / $vm -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
     *) if is_local "$h"; then env -u TMUX "${SHELL:-/bin/zsh}" -lc "$s"
-       else ssh -t -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o LogLevel=ERROR \
+       else ssh -t -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o LogLevel=ERROR \
               "$t" "exec \"\$SHELL\" -lc \"\$(printf %s $(b64 "$s") | base64 -d)\""; fi ;;
   esac
 }
@@ -112,24 +125,69 @@ if command -v tmux >/dev/null; then
   tmux list-sessions -F "#{session_name}|#{session_activity}|#{session_attached}|#{pane_title}" 2>/dev/null | grep "^gwm-" |
   while IFS="|" read -r n act att title; do echo "S|${n#gwm-}|$((now-act))|$att|$(echo "$title" | tr "|" "/")"; done
 fi
+if [ "$(uname)" = Darwin ]; then
+  # who is using this machine over SSH: T = interactive terminals (tabs), C = all SSH connections, per source IP
+  who | sed -n "s/.*(\(.*\))\$/\1/p" | sed "s/^fe80:[0-9a-f]*::/fe80::/" | sort | uniq -c | while read -r k ip; do echo "T|$ip|$k"; done
+  lsof -nP -iTCP:22 -sTCP:ESTABLISHED 2>/dev/null | awk "NR>1 && \$1 ~ /sshd/ {print \$9}" | sort -u | sed "s/.*->//" |
+    sed "s/:[0-9]*\$//; s/^\[//; s/\]\$//; s/^fe80:[0-9a-f]*::/fe80::/" | sort | uniq -c | while read -r k ip; do echo "C|$ip|$k"; done
+fi
 '
+demo_probe() {  # fake but lively data for `gwm demo`
+  local t=$(( $(date +%s) / 5 )) r=$RANDOM
+  echo "studio|H|$((18 + r % 15))%|31/64G|inkling-2-mini|sandbox:Running"
+  echo "studio|S|landing-page|$(( t % 3 == 0 ? 40 : 2 ))|1|✳ Building hero section"
+  echo "studio|S|local-refactor|840|0|✳ Refactor CLI arg parsing"
+  echo "studio|T|10.0.0.3|1"; echo "studio|C|10.0.0.3|1"
+  echo "office-1|H|$((64 + r % 20))%|88/128G|qwen3.8-27b,flux-dev|-"
+  echo "office-1|S|api-tests|$(( t % 2 == 0 ? 3 : 95 ))|0|✳ Fixing flaky API tests"
+  echo "macbook|H|$((6 + r % 6))%|14/24G|-|-"
+  echo "sandbox|H|$((3 + r % 4))%|2/8G|-|-"
+  echo "sandbox|S|load-test|1500|0|✳ Load test finished"
+}
 probe_all() {  # → "host|H|..." and "host|S|..." lines, all hosts in parallel
+  [ -n "${GWM_DEMO:-}" ] && { demo_probe; return; }
   local tmp; tmp="$(mktemp -d)"
   while IFS=$'\t' read -r h _; do
-    ( out="$(run_script "$h" "$PROBE" 2>/dev/null | grep -E '^[HS]\|')"
+    ( out="$(run_script "$h" "$PROBE" 2>/dev/null | grep -E '^[HSTC]\|')"
       [ -n "$out" ] || out="DOWN"; printf '%s\n' "$out" | sed "s/^/$h|/" > "$tmp/$h" ) &
   done < <(hosts)
   wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
 }
+ip_map() {  # "ip<TAB>hostname" for every SSH host, resolved from this machine (Bonjour .local names work)
+  [ -n "${GWM_DEMO:-}" ] && { printf '10.0.0.3\tmacbook\n'; return; }
+  while IFS=$'\t' read -r h t _; do
+    case "$t" in vm:*) continue;; esac
+    local hn="${t#*@}" ip
+    if [[ "$hn" =~ ^[0-9.]+$ ]]; then printf '%s\t%s\n' "$hn" "$h"
+    else dscacheutil -q host -a name "$hn" 2>/dev/null | awk -v h="$h" '/ip_address|ipv6_address/{ip=$2; sub(/^fe80:[0-9a-f]*::/,"fe80::",ip); if(ip!="::1" && ip!="127.0.0.1" && ip!="fe80::1") printf "%s\t%s\n", ip, h}'; fi
+  done < <(hosts)
+}
+used_by() {  # used_by <host> <probe data> <ip map>  → "macbook: 2 tabs, 1 agent"
+  local h="$1" data="$2" map="$3" me; me="$(self_name)"
+  grep "^$h|C|" <<<"$data" | while IFS='|' read -r _ _ ip conns; do
+    local who tabs agents
+    who="$(awk -F'\t' -v ip="$ip" '$1==ip{print $2; exit}' <<<"$map")"; [ -n "$who" ] || who="$ip"
+    tabs="$(grep "^$h|T|$ip|" <<<"$data" | cut -d'|' -f4)"; tabs="${tabs:-0}"
+    agents=$((conns - tabs)); [ "$who" = "$me" ] && [ "$h" != "$me" ] && agents=$((agents - 1))   # minus this status check
+    [ "$agents" -lt 0 ] && agents=0
+    printf '%s %s %s\n' "$who" "$tabs" "$agents"
+  done | awk '{t[$1]+=$2; a[$1]+=$3; if(!($1 in o)){o[$1]=++n; k[n]=$1}}
+    END{for(i=1;i<=n;i++){w=k[i]; s="";
+      if(t[w]>0) s=t[w] " tab" (t[w]>1?"s":"");
+      if(a[w]>0) s=s (s?", ":"") a[w] " agent" (a[w]>1?"s":"");
+      if(s) out=out (out?"; ":"") w ": " s}
+    print out}'
+}
 print_table() {
-  local data cols; data="$(probe_all)"; cols=$(tput cols 2>/dev/null || echo 140)
-  printf "$(c '1;38;5;214')%-12s %-13s %5s %-9s %-26s %s$(c 0)\n" HOST STATUS CPU RAM "MODELS LOADED" "VMs"
+  local data cols map; data="$(probe_all)"; map="$(ip_map)"; cols=$(tput cols 2>/dev/null || echo 140)
+  printf "$(c '1;38;5;214')%-12s %-13s %5s %-9s %-22s %-16s %s$(c 0)\n" HOST STATUS CPU RAM "MODELS LOADED" "VMs" "USED BY (other devices)"
   while IFS=$'\t' read -r h t role; do
     line="$(grep "^$h|H|" <<<"$data")"
     if [ -n "$line" ]; then
       IFS='|' read -r _ _ cpu ram models vms <<<"$line"
       st="● on"; is_local "$h" && st="● on (here)"; case "$t" in vm:*) st="● vm";; esac
-      printf "%-12s $(c 32)%-15s$(c 0) %5s %-9s %-26.26s %s\n" "$h" "$st" "$cpu" "$ram" "$models" "$vms" | cut -c1-$((cols+12))
+      ub="$(used_by "$h" "$data" "$map")"
+      printf "%-12s $(c 32)%-15s$(c 0) %5s %-9s %-22.22s %-16.16s $(c 35)%s$(c 0)\n" "$h" "$st" "$cpu" "$ram" "$models" "${vms:--}" "${ub:-—}" | cut -c1-$((cols+24))
     else
       printf "%-12s $(c 31)%-15s$(c 0) %s\n" "$h" "○ offline" "asleep / off / not set up → gwm doctor"
     fi
@@ -145,7 +203,7 @@ print_table() {
       col=32; [ "${st%% *}" = working ] && col=33
       printf "%-14s %-10s %-9s %-10s $(c $col)%-12s$(c 0) %s\n" "$n" "$h" "$e" "$a" "$st" "$title" | cut -c1-$((cols+12))
     elif grep -q "^$h|H|" <<<"$data"; then
-      printf "%-14s %-10s %-9s %-10s $(c 2)%-12s$(c 0)\n" "$n" "$h" "$e" "$a" "not started"
+      printf "%-14s %-10s %-9s %-10s $(c 2)%-12s %s$(c 0)\n" "$n" "$h" "$e" "$a" "not running" "→ gwm open $n"
     else
       printf "%-14s %-10s %-9s %-10s $(c 31)%-12s$(c 0)\n" "$n" "$h" "$e" "$a" "host offline"
     fi
@@ -153,7 +211,9 @@ print_table() {
 }
 cmd_board() {
   while true; do
-    out="$(print_table 2>&1)"; clear
+    out="$(print_table 2>&1)"
+    [ "${ZELLIJ_SESSION_NAME:-}" = "$HUBNAME" ] && renumber_tabs   # also fixes numbers after tabs are moved/closed by hand
+    clear
     printf "$(c 2)go-with-me · %s · refreshes every 5s · * = someone attached$(c 0)\n\n%s\n" "$(date +%H:%M:%S)" "$out"
     sleep 5
   done
@@ -170,36 +230,139 @@ start_cmd() {  # the command that creates-or-attaches session <name> on its host
     shell)    prog='exec $SHELL -l' ;;
     *) die "session '$n': unknown engine '$e' (use claude, opencode or shell)" ;;
   esac
-  [ -n "$env" ] && echo "mkdir -p $ACCT_DIR/$a; cd $f 2>/dev/null || cd; tmux new-session -A -s $PFX$n $env '$prog'" \
-                || echo "cd $f 2>/dev/null || cd; tmux new-session -A -s $PFX$n '$prog'"
+  # tmux on the host is only a keep-alive layer: no status bar, no prefix key, so you never have to deal with it
+  local quiet="\\; set-option -t $PFX$n status off \\; set-option -t $PFX$n prefix None \\; set-option -t $PFX$n prefix2 None \\; set-option -s escape-time 10"
+  [ -n "$env" ] && echo "mkdir -p $ACCT_DIR/$a; cd $f 2>/dev/null || cd; tmux new-session -A -s $PFX$n $env '$prog' $quiet" \
+                || echo "cd $f 2>/dev/null || cd; tmux new-session -A -s $PFX$n '$prog' $quiet"
 }
 cmd_attach() {
   local n="$1" h; need_session "$n"; h="$(sfield "$n" 2)"
+  [ -n "${GWM_DEMO:-}" ] && exec bash "$DIR/demo/agent.sh" "$n"
   while true; do
     clear; echo "Connecting to $n on $h …"
     run_tty "$h" "$(start_cmd "$n")"
     echo; echo "$(c 33)Disconnected from $n.$(c 0) If it was running, it keeps running on $h."
-    printf "Enter = reconnect · Ctrl+a & = close this tab: "; read -r _ || exit 0
+    printf "Press Enter to reconnect (to remove this session: gwm close %s): " "$n"; read -r _ || exit 0
   done
 }
+
+# ---------- hub (Zellij) ----------
+HUBNAME="${GWM_HUB:-gwm}"
+hub_running() { zellij list-sessions -n 2>/dev/null | grep -E "^$HUBNAME " | grep -vq EXITED; }
+tab_layout() {  # tab_layout <session>  → KDL for one session tab
+  local n="$1" h e a; h="$(sfield "$n" 2)"; e="$(sfield "$n" 3)"; a="$(sfield "$n" 4)"
+  local label="$n · $e on $h"; [ "$e" = claude ] && label="$label · account: $a"
+  printf '  tab name="%s" {\n    pane name="%s" command="%s" { args "attach" "%s"; }\n  }\n' "$n" "$label" "$ME" "$n"
+}
+BARS='  default_tab_template {
+    pane size=1 borderless=true { plugin location="zellij:tab-bar"; }
+    children
+    pane size=2 borderless=true { plugin location="zellij:status-bar"; }
+  }'
+running_sessions() {  # names of configured sessions that are running right now on their machine
+  local data; data="$(probe_all)"
+  while IFS=$'\t' read -r n h _; do grep -q "^$h|S|$n|" <<<"$data" && echo "$n"; done < <(sessions)
+}
+write_layout() {  # only sessions that are already running get a tab; others are opened with `gwm open <name>`
+  local i=1 n
+  { echo "layout {"; echo "$BARS"
+    printf '  tab name="1 overview" focus=true split_direction="horizontal" {\n'
+    printf '    pane name="STATUS BOARD · every machine and session · refreshes every 5s" size="40%%" command="%s" { args "board"; }\n' "$ME"
+    if [ -n "${GWM_DEMO:-}" ]; then printf '    pane name="COORDINATOR · ask about or hand work to any session" focus=true command="bash" { args "%s"; }\n  }\n' "$DIR/demo/coordinator.sh"
+    else printf '    pane name="COORDINATOR · ask about or hand work to any session" focus=true command="claude" cwd="%s"\n  }\n' "$DIR/coordinator"; fi
+    for n in $(running_sessions); do i=$((i+1)); tab_layout "$n" | sed "1s/tab name=\"$n\"/tab name=\"$i $n\"/"; done
+    echo "}"; } > "$CFG/hub-layout.kdl"
+}
 cmd_open() {
-  command -v tmux >/dev/null || die "tmux not installed (brew install tmux)"
+  command -v zellij >/dev/null || die "zellij not installed (brew install zellij)"
   [ -n "$(self_name)" ] || die "run 'gwm init <this-host-name>' first"
-  if ! tmux -L $SOCK has-session -t $HUB 2>/dev/null; then
-    tmux -L $SOCK -f "$DIR/hub.tmux.conf" new-session -d -s $HUB -n overview -x 200 -y 50 "$ME board"
-    tmux -L $SOCK split-window -v -l 70% -t $HUB:overview -c "$DIR/coordinator" 'claude; exec $SHELL -l'
-    while IFS=$'\t' read -r n _; do tmux -L $SOCK new-window -d -t $HUB -n "$n" "$ME attach $n"; done < <(sessions)
-    tmux -L $SOCK select-window -t $HUB:overview
+  [ "${ZELLIJ_SESSION_NAME:-}" = "$HUBNAME" ] && die "you're already inside the go-with-me hub"
+  # don't leak this terminal's Claude Code session markers into the hub's Claude sessions
+  for v in $(env | sed -n 's/^\(CLAUDECODE\|CLAUDE_CODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+  if hub_running; then exec zellij attach "$HUBNAME"; fi
+  zellij delete-session "$HUBNAME" >/dev/null 2>&1
+  echo "Checking which sessions are running…"; write_layout
+  exec zellij --config "$DIR/hub.zellij.kdl" --session "$HUBNAME" --new-session-with-layout "$CFG/hub-layout.kdl"
+}
+hub_tabs() {  # "id<TAB>position<TAB>name-without-number" for every hub tab
+  zellij --session "$HUBNAME" action list-tabs 2>/dev/null |
+    awk 'NR>1{id=$1; pos=$2; $1=$2=""; sub(/^[[:space:]]+/,""); sub(/^[0-9]+ /,""); printf "%s\t%s\t%s\n", id, pos, $0}'
+}
+renumber_tabs() {  # keep "N name" in sync with tab positions, so Alt+N always matches the number shown
+  hub_running || return 0
+  hub_tabs | while IFS=$'\t' read -r id pos name; do
+    zellij --session "$HUBNAME" action list-tabs 2>/dev/null | awk -v id="$id" 'NR>1 && $1==id' | grep -q " $((pos+1)) $name\$" ||
+      zellij --session "$HUBNAME" action rename-tab-by-id "$id" "$((pos+1)) $name" >/dev/null 2>&1
+  done
+}
+open_tab() {  # open (or jump to) the hub tab for <session>
+  hub_running || return 1
+  if hub_tabs | cut -f3 | grep -qx "$1"; then
+    zellij --session "$HUBNAME" action go-to-tab-by-id "$(hub_tabs | awk -F'\t' -v n="$1" '$3==n{print $1; exit}')" >/dev/null 2>&1; return 0; fi
+  local tmp="$CFG/tab-$1.kdl"; { echo "layout {"; echo "$BARS"; tab_layout "$1" | sed '1s/^  tab [^{]*{/  tab {/'; echo "}"; } > "$tmp"
+  zellij --session "$HUBNAME" action new-tab --name "$1" --layout "$tmp" >/dev/null 2>&1; rm -f "$tmp"
+  renumber_tabs
+}
+close_tab() {  # close the hub tab for <session>, if open
+  hub_running || return 0
+  local id; id="$(hub_tabs | awk -F'\t' -v n="$1" '$3==n{print $1; exit}')"
+  [ -n "$id" ] && zellij --session "$HUBNAME" action close-tab-by-id "$id" >/dev/null 2>&1
+  renumber_tabs
+}
+cmd_open_session() {
+  local n="$1"; need_session "$n"
+  open_tab "$n" && echo "$(c 32)✓$(c 0) '$n' is open in the hub." || { echo "The hub isn't open — starting '$n' in this terminal instead."; cmd_attach "$n"; }
+}
+ask() {  # ask "Question" default  → reply (or default when not interactive)
+  local q="$1" d="$2" r; if [ -t 0 ]; then printf '%s%s: ' "$q" "${d:+ [$d]}" >&2; read -r r; fi; echo "${r:-$d}"; }
+cmd_new() {
+  local n="" h="" e="" a="" f=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --on) h="$2"; shift 2;; --engine) e="$2"; shift 2;; --account) a="$2"; shift 2;; --folder) f="$2"; shift 2;;
+    *) n="$1"; shift;; esac; done
+  echo "$(c 1)New session$(c 0) — a new tab running on one of your machines"
+  if [ -z "$h" ]; then echo "Machines: $(hosts | cut -f1 | paste -sd' ' - | sed 's/ /, /g')"; h="$(ask "Machine" "$(self_name)")"; fi
+  need_host "$h"
+  [ -n "$e" ] || e="$(ask "Engine — claude, opencode (local models) or shell" claude)"
+  case "$e" in claude|opencode|shell) ;; *) die "engine must be claude, opencode or shell";; esac
+  if [ "$e" = claude ]; then [ -n "$a" ] || a="$(ask "Claude account — default, or a label like work" default)"; else a="-"; fi
+  [ -n "$f" ] || f="$(ask "Start folder" "~")"
+  [ -n "$n" ] || n="$(ask "Tab name" "$h-$e")"
+  [[ "$n" =~ ^[A-Za-z0-9_-]+$ ]] || die "tab name: letters, digits, - and _ only"
+  sfield "$n" 1 >/dev/null 2>&1 && die "a session called '$n' already exists"
+  printf '%-14s| %-8s| %-9s| %-8s| %s\n' "$n" "$h" "$e" "$a" "$f" >> "$SESSIONS"
+  open_tab "$n"
+  echo "$(c 32)✓$(c 0) Added '$n' ($e on $h$([ "$e" = claude ] && echo ", account $a"))."
+  hub_running && echo "  Its tab is open in the hub." || echo "  Open the hub with: gwm"
+  [ "$e" = claude ] && [ "$a" != default ] && echo "  First time with account '$a' on $h? Sign in inside the tab, or: gwm login $a --on $h"
+}
+cmd_close() {
+  local n="" yes=""; for x in "$@"; do case "$x" in -y|--yes) yes=1;; *) n="$x";; esac; done
+  [ -n "$n" ] || die "usage: gwm close <session> [--yes]"; need_session "$n"
+  local h; h="$(sfield "$n" 2)"
+  if [ -z "$yes" ]; then
+    [ -t 0 ] || die "add --yes to confirm closing '$n'"
+    printf "Close '%s'? This stops whatever is running in it on %s and removes its tab. [y/N] " "$n" "$h"; read -r r
+    case "$r" in y|Y|yes) ;; *) echo "Cancelled."; return;; esac
   fi
-  [ -n "${GWM_NO_ATTACH:-}" ] && return 0
-  if [ -n "${TMUX:-}" ]; then env -u TMUX tmux -L $SOCK attach -t $HUB; else exec tmux -L $SOCK attach -t $HUB; fi
+  run_script "$h" "tmux kill-session -t $PFX$n 2>/dev/null" || true
+  awk -F'|' -v n="$n" '{v=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$SESSIONS" > "$SESSIONS.new" && mv "$SESSIONS.new" "$SESSIONS"
+  close_tab "$n"
+  echo "$(c 32)✓$(c 0) Closed '$n' on $h."
 }
 cmd_peek() { local n="$1" k="${2:-40}"; need_session "$n"
   run_script "$(sfield "$n" 2)" "tmux capture-pane -p -J -t $PFX$n -S -$k 2>/dev/null | awk 'NF{p=NR} {l[NR]=\$0} END{for(i=1;i<=p;i++) print l[i]}' || echo '(session $n is not running)'"; }
 cmd_send() { local n="$1"; shift; need_session "$n"
   run_script "$(sfield "$n" 2)" "printf %s $(b64 "$*") | base64 -d | tmux load-buffer -b gwm - && tmux paste-buffer -d -b gwm -t $PFX$n && sleep 0.3 && tmux send-keys -t $PFX$n Enter && echo 'sent to $n'"; }
-cmd_restart() { local n="$1"; need_session "$n"
-  run_script "$(sfield "$n" 2)" "tmux kill-session -t $PFX$n 2>/dev/null; echo 'stopped $n — it starts fresh next time its tab connects (press Enter there)'"; }
+cmd_stop() { local n="$1"; need_session "$n"
+  run_script "$(sfield "$n" 2)" "tmux kill-session -t $PFX$n 2>/dev/null; echo 'stopped $n — its tab stays; press Enter there to start it fresh'"; }
+cmd_who() {  # who is using which machine right now
+  local data map; data="$(probe_all)"; map="$(ip_map)"
+  while IFS=$'\t' read -r h _; do
+    if grep -q "^$h|H|" <<<"$data"; then ub="$(used_by "$h" "$data" "$map")"; printf "%-12s %s\n" "$h" "${ub:-nobody else}"
+    else printf "%-12s %s\n" "$h" "offline"; fi
+  done < <(hosts)
+}
 
 # ---------- hosts ----------
 cmd_run() { local h="$1"; shift; need_host "$h"; run_script "$h" "cd ~ && eval \"\$(printf %s $(b64 "$*") | base64 -d)\""; }
@@ -308,14 +471,17 @@ cmd_sync() { local h="$1"; need_host "$h"
   echo "Copied hosts + sessions config from $h."; }
 
 case "${1:-open}" in
-  open) cmd_open ;;  board) cmd_board ;;  status) print_table ;;
-  kill) tmux -L $SOCK kill-server 2>/dev/null; echo "Hub closed. Sessions keep running on their hosts." ;;
+  open) if [ $# -ge 2 ]; then cmd_open_session "$2"; else cmd_open; fi ;;  board) cmd_board ;;  status) print_table ;;
+  kill) zellij kill-session "$HUBNAME" >/dev/null 2>&1; zellij delete-session "$HUBNAME" >/dev/null 2>&1; echo "Hub closed. Sessions keep running on their machines." ;;
+  who) cmd_who ;;
+  new) shift; cmd_new "$@" ;;
+  close) shift; cmd_close "$@" ;;
+  stop|restart) [ $# -ge 2 ] || die "usage: gwm stop <session>"; cmd_stop "$2" ;;
   sessions) sessions | awk -F'\t' 'BEGIN{printf "%-14s %-10s %-9s %-10s %s\n","SESSION","HOST","ENGINE","ACCOUNT","FOLDER"} {printf "%-14s %-10s %-9s %-10s %s\n",$1,$2,$3,$4,$5}' ;;
   hosts) hosts | awk -F'\t' '{printf "%-12s %-28s %s\n",$1,$2,$3}' ;;
   attach)  [ $# -ge 2 ] || die "usage: gwm attach <session>"; cmd_attach "$2" ;;
   peek)    [ $# -ge 2 ] || die "usage: gwm peek <session> [lines]"; cmd_peek "$2" "${3:-40}" ;;
   send)    [ $# -ge 3 ] || die "usage: gwm send <session> <text>"; shift; cmd_send "$@" ;;
-  restart) [ $# -ge 2 ] || die "usage: gwm restart <session>"; cmd_restart "$2" ;;
   run)     [ $# -ge 3 ] || die "usage: gwm run <host> <command>"; shift; cmd_run "$@" ;;
   doctor) cmd_doctor ;;
   accounts) shift; cmd_accounts "$@" ;;  login) shift; cmd_login "$@" ;;

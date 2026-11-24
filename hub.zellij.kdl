@@ -1,0 +1,30 @@
+// go-with-me hub settings for Zellij (only used by the hub)
+//
+// "Unlock first" keys: every key goes straight to the program in the tab (Claude, opencode…)
+// until you press Ctrl+g. Then single keys work, and the bottom bar shows them, e.g.
+//   Ctrl+g  t  then n = new tab · x = close tab · ←/→ = switch tab
+//   Ctrl+g  o  then d = leave the hub (everything keeps running)
+// Mouse: click a tab to switch, click a pane to focus it, scroll to scroll.
+keybinds preset="unlock-first" {
+    locked {
+        bind "Alt 1" { GoToTab 1; }
+        bind "Alt 2" { GoToTab 2; }
+        bind "Alt 3" { GoToTab 3; }
+        bind "Alt 4" { GoToTab 4; }
+        bind "Alt 5" { GoToTab 5; }
+        bind "Alt 6" { GoToTab 6; }
+        bind "Alt 7" { GoToTab 7; }
+        bind "Alt 8" { GoToTab 8; }
+        bind "Alt 9" { GoToTab 9; }
+        bind "Alt Left" { GoToPreviousTab; }
+        bind "Alt Right" { GoToNextTab; }
+    }
+}
+
+show_startup_tips false
+mouse_mode true
+pane_frames true
+session_serialization false
+
+show_setup_screen false
+show_release_notes false

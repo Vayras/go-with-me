@@ -19,6 +19,9 @@ across machines, and hand work to the right session when asked.
 - `gwm run <host> "<shell command>"` — run a command on a host or VM
 - `gwm models --on <host>` — installed/loaded local models;  `gwm vm list --on <host>` — VMs
 - `gwm accounts --on <host>` — which Claude accounts are signed in there
+- `gwm who` — which other devices are connected to each machine
+- `gwm new <name> --on <host> --engine claude|opencode|shell --account <a> --folder <f>` — start a session (ask the user first)
+- `gwm open <session>` / `gwm close <session> --yes` — open a tab for a session / stop it and remove it (ask the user first)
 
 ## Rules
 - "Summarise" / "what's going on": `gwm status`, then `gwm peek` each running session; give a short per-session

@@ -1,108 +1,128 @@
 # go-with-me
 
-**One terminal for all your machines.** A tmux-based hub that joins your Macs, Linux VMs, multiple Claude accounts and local models into a single window:
+**One terminal for all your machines, Claude accounts, VMs and local models.**
 
-```
- go-with-me  0 overview  1 studio  2 studio-work  3 studio-local  4 macbook      click a tab · Alt+0-9 · Ctrl+a d = leave
-┌ STATUS BOARD ─────────────────────────────────────────────────────────────────────────────────────┐
-│ HOST      STATUS        CPU  RAM     MODELS LOADED     VMs                                        │
-│ studio    ● on (here)    6%  13/64G  inkling-2-mini    sandbox:Running                            │
-│ macbook   ● on           9%  14/48G  -                                                            │
-│ sandbox   ● vm           1%   1/8G   -                                                            │
-│                                                                                                   │
-│ SESSION       HOST     ENGINE    ACCOUNT   STATE        CURRENT TASK                              │
-│ studio        studio   claude    default   working      Landing page hero section                 │
-│ studio-work   studio   claude    work      idle 4m *    Fix flaky API tests                       │
-│ studio-local  studio   opencode  -         idle 12m     OpenCode                                  │
-│ macbook       macbook  claude    default   idle 1h                                                │
-├ COORDINATOR — ask about or delegate to any device ────────────────────────────────────────────────┤
-│ > summarise everything                                                                            │
-│ > when studio-work's tests pass, tell the sandbox session to run the load test                    │
-└───────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
+Your Mac Studio, your work laptop, an office box and a Linux VM become tabs in one window. A live board shows what every machine and agent is doing, and a coordinator Claude can summarise everything and hand work to the right machine.
 
-- **Tab 0, overview:** a live board of every host and session, plus a **coordinator** Claude that can read any session's screen, summarise everything, and hand work to the right machine.
-- **One tab per session.** A session is **host + engine + account + folder**:
-  - **engine:** `claude` (Claude Code), `opencode` (local models via Ollama) or `shell`
-  - **account:** separate Claude logins side by side (e.g. personal + work), each fully isolated
-- **Sessions persist.** They live in tmux *on their host*, so closing your laptop doesn't stop them. Run `gwm` again to pick up where you left off.
-- **VMs:** create Linux VMs (via [Lima](https://lima-vm.io)) on your strongest machine; they appear as hosts with their own sessions.
-- **Local models:** see what's loaded where, pull models, and point opencode at any host's Ollama.
-
-It's plain bash + tmux + ssh. There's no server and no daemon.
-
-## Requirements
-
-- macOS (hosts can also be Linux, e.g. VMs), `tmux`, `ssh` between machines (key-based)
-- [Tailscale](https://tailscale.com) recommended, so hosts reach each other from anywhere
-- Optional: [Claude Code](https://claude.com/claude-code), [opencode](https://opencode.ai), [Ollama](https://ollama.com), [Lima](https://lima-vm.io)
-
-## Install
+![go-with-me demo](docs/demo.gif)
 
 ```bash
-git clone https://github.com/<you>/go-with-me ~/go-with-me
-cd ~/go-with-me && ./install.sh          # links `go-with-me` and `gwm` into ~/.local/bin
-gwm init studio                          # say which host this machine is (creates ~/.config/go-with-me)
-gwm edit                                 # list your hosts and sessions
-gwm doctor                               # check every host is reachable
-gwm                                      # open the hub
+git clone https://github.com/Vayras/go-with-me && cd go-with-me && ./go-with-me demo
+```
+☝️ **Live demo, no setup.** It opens the real hub with pretend machines and agents. No SSH, no logins, and nothing on your computer is touched. (Needs [Zellij](https://zellij.dev): `brew install zellij`.)
+
+---
+
+## What you get
+
+<table>
+<tr>
+<td width="50%"><img src="docs/hub-overview.png" alt="Overview tab"></td>
+<td width="50%"><img src="docs/session-tab.png" alt="A session tab"></td>
+</tr>
+<tr>
+<td><b>Overview tab.</b> Every machine (CPU, RAM, loaded models, VMs, <i>which other devices are using it</i>) and every session (working / idle / current task). Below it, a <b>coordinator</b> Claude you can ask "what's going on?" or "tell the VM to rerun the load test".</td>
+<td><b>One tab per session.</b> Each session runs on its own machine and <b>keeps running</b> when you close your laptop. Tabs are numbered by position and renumber themselves; <b>Alt+1…9</b> jumps straight to one.</td>
+</tr>
+</table>
+
+A **session** is *machine + engine + account + folder*:
+
+| | |
+|---|---|
+| **Machines** | Any Mac (or Linux box) you can SSH to. Works great over [Tailscale](https://tailscale.com), so it works from anywhere. |
+| **Engines** | `claude` (Claude Code), `opencode` (local models via [Ollama](https://ollama.com), no cloud tokens), `shell` |
+| **Accounts** | Several Claude logins side by side, e.g. `personal` on one tab and `work` on another, each fully separate |
+| **VMs** | `gwm vm create sandbox --on studio` makes a Linux VM ([Lima](https://lima-vm.io)) on your strongest machine; it shows up as a machine with its own sessions |
+
+<img src="docs/status.png" alt="gwm status" width="100%">
+
+`gwm status` shows the same board in any terminal. `gwm who` tells you which devices are connected to which machine.
+
+## Quick start
+
+```bash
+brew install zellij tmux
+git clone https://github.com/Vayras/go-with-me ~/go-with-me && ~/go-with-me/install.sh   # adds `gwm`
+gwm init studio        # name this machine; creates ~/.config/go-with-me
+gwm edit               # list your machines and sessions (examples inside)
+gwm doctor             # checks every machine is reachable and what's installed
+gwm                    # open the hub
 ```
 
-Each host needs: **Remote Login** on (System Settings → General → Sharing), this machine's SSH key in its `~/.ssh/authorized_keys`, and `tmux`.
+Every other machine needs: **Remote Login** on (System Settings → General → Sharing), this machine's SSH key in its `~/.ssh/authorized_keys` (`ssh-copy-id you@that-mac`), and `tmux`.
+
+## Everyday use
+
+| Do this | Command |
+|---|---|
+| Open the hub (only running sessions get a tab) | `gwm` |
+| Start a new session (asks machine / engine / account / folder) | `gwm new` |
+| Open a tab for a session that isn't running | `gwm open <session>` |
+| Close a session and its tab | `gwm close <session>` |
+| Stop it but keep the tab (Enter in the tab restarts it) | `gwm stop <session>` |
+| See everything at a glance / who's using what | `gwm status` · `gwm who` |
+| Read or type into a session from anywhere | `gwm peek <session>` · `gwm send <session> "text"` |
+| Run a command on a machine | `gwm run <machine> "git status"` |
+| Sign a Claude account in on a machine | `gwm login work --on studio` |
+| Linux VMs | `gwm vm create <name> --on <machine> [--cpus 6 --memory 16]` · `gwm vm list` |
+| Local models | `gwm models --on studio` · `gwm pull <model>` · `gwm opencode-setup --on studio` |
+| Leave the hub (everything keeps running) | **Ctrl+g → o → d**, or close the window |
+
+**In the hub:** click tabs and panes with the mouse. Keys go straight to Claude or opencode until you press **Ctrl+g**; the bottom bar then shows what each key does. **Alt+1…9** and **Alt+←/→** switch tabs at any time (Terminal.app: enable *Use Option as Meta key*).
 
 ## Config
 
 `~/.config/go-with-me/hosts.conf`
 ```
-# name   | ssh target          | role
-studio   | you@my-mac-studio   | Home Mac Studio, 64GB. Always on. Local models, VMs.
-macbook  | you@my-macbook-pro  | Work laptop; may be asleep.
-sandbox  | vm:studio/sandbox   | Linux VM on studio
+# name   | ssh target         | role (the coordinator reads this)
+studio   | you@my-mac-studio  | Home Mac Studio, 64GB. Always on. Local models, VMs.
+macbook  | you@my-macbook     | Work laptop; may be asleep.
+sandbox  | vm:studio/sandbox  | Linux VM on studio
 ```
-
 `~/.config/go-with-me/sessions.conf`
 ```
-# name        | host    | engine   | account | folder
-studio        | studio  | claude   | default | ~/code
-studio-work   | studio  | claude   | work    | ~/work
-studio-local  | studio  | opencode | -       | ~/code
-macbook       | macbook | claude   | default | ~
+# name        | machine | engine   | account | folder
+site          | studio  | claude   | default | ~/code/site
+work-api      | studio  | claude   | work    | ~/work/api
+local         | studio  | opencode | -       | ~/code
 ```
+`gwm new` / `gwm close` edit this for you. `gwm sync <machine>` copies the config from another machine.
 
-## Commands
+## How it works
 
-| Command | What it does |
+Plain bash, no daemon or server:
+
+- **Zellij** draws the hub on the machine you're sitting at.
+- Each session lives in a **hidden tmux** on its own machine (no status bar, no prefix key; it's only there so sessions survive disconnects). Tabs reconnect to it over **SSH**.
+- The board polls every machine over SSH every 5 s: CPU/RAM, Ollama's loaded models, Lima VMs, tmux sessions, and incoming SSH connections (that's the **used by** column).
+- **Accounts** = a separate `CLAUDE_CONFIG_DIR` per label on each machine.
+- The **coordinator** is a normal Claude Code session with instructions to use `gwm status / peek / send / run`. It asks before sending to a session or changing anything.
+
+## Similar projects
+
+The pieces of go-with-me exist elsewhere; the combination is what's different. Worth a look:
+
+| Project | Overlap |
 |---|---|
-| `gwm` | open the hub (or re-attach) |
-| `gwm status` / `gwm board` | status table once / live |
-| `gwm peek <session> [n]` | show a session's screen |
-| `gwm send <session> "text"` | type into a session + Enter |
-| `gwm restart <session>` | stop a session (restarts on reconnect) |
-| `gwm run <host> "cmd"` | run a command on a host or VM |
-| `gwm accounts [--on host]` | which Claude accounts are signed in |
-| `gwm login <account> [--on host]` | sign an account in (stored in `~/.config/go-with-me/accounts/<account>`) |
-| `gwm vm create <name> [--on host] [--cpus N --memory GB --disk GB]` | new Linux VM with tmux + Claude Code, added as a host and session |
-| `gwm vm list\|start\|stop\|delete` | manage VMs |
-| `gwm models [--on host]` / `gwm pull <model>` | local models (Ollama) |
-| `gwm opencode-setup [--on host] [--model m]` | point opencode at that host's Ollama |
-| `gwm sync <host>` | copy hosts/sessions config from another host |
-| `gwm doctor` | check reachability and installed tools on every host |
-| `gwm kill` | close the hub (sessions keep running) |
+| [herdr](https://github.com/ogulcancelik/herdr) | The closest: a terminal multiplexer for agents, with remote machines over SSH and agent status per pane. Much more mature. |
+| [AI Maestro](https://github.com/23blocks-OS/ai-maestro), [Codeman](https://github.com/Ark0N/Codeman), [ADHDev](https://github.com/vilmire/adhdev), [Agent Deck](https://github.com/asheshgoplani/agent-deck) | Multi-machine agent dashboards (mostly web UIs) |
+| [Claude Code Remote Control](https://code.claude.com/docs/en/remote-control) | Anthropic's way to reach your sessions from claude.ai and your phone |
+| [ccswap](https://github.com/vvinhas/ccswap), [claude-switch](https://github.com/hoangvu12/claude-switch) | Claude multi-account switching on one machine |
 
-### In the hub
-- **Click** a tab, or press **Alt+0…9** (Terminal.app: Settings → Profiles → Keyboard → *Use Option as Meta key*)
-- **Ctrl+a d**: leave the hub; everything keeps running
-- The hub's prefix is **Ctrl+a**, so **Ctrl+b** still reaches tmux inside a session
+**go-with-me's angle:** a *machine-level* board (resources, local models, VMs, who's connected), **per-session Claude accounts** mixed across machines, **local models and Lima VMs as first-class citizens**, and a coordinator that works over your own SSH. It's all in the terminal and simple enough to read in one sitting.
 
-## How accounts work
-
-Claude Code keeps its login in a config directory. `go-with-me` gives each account label its own directory (`CLAUDE_CONFIG_DIR=~/.config/go-with-me/accounts/<label>`) on the host where the session runs, so `default` (your normal login) and e.g. `work` stay separate, including history and settings.
+**Not there yet:** phone and web access, "needs your input" alerts, git worktree isolation, cost tracking, and restoring layouts after a reboot. PRs welcome.
 
 ## Security notes
 
-- `gwm send` / `gwm run` execute on your machines over SSH. The coordinator is instructed to ask before sending to sessions or running anything that changes state, but treat it like any agent with shell access.
-- Lima VMs mount your home folder **read-only** by default, which makes them handy sandboxes.
+- `gwm send` / `gwm run` execute on your machines over SSH. Treat the coordinator like any agent with shell access.
+- Lima VMs mount your home folder **read-only** by default, which makes them good sandboxes.
 - Check your employer's policy before joining work machines or work accounts.
+
+## Status
+
+Early, and built for macOS (Linux works for VMs and remote machines). The VM commands are new and lightly tested. Issues and PRs welcome.
 
 ## License
 
