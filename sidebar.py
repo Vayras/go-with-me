@@ -4,7 +4,7 @@
 Layout, grouped by what belongs together:
   header
   coordinator                       (the overview tab)
-  THIS MAC — CPU/GPU/RAM, every loaded model, VMs, who's using it, its sessions;  OTHER MACHINES — compact cards,
+  THIS MAC — CPU/GPU/RAM, every loaded model, VMs, who's using it, its sessions;  OTHER MACHINES — CPU/GPU/RAM when online,
                                     then that machine's sessions
   actions                           new · close · refresh · help
   details of the highlighted session
@@ -133,6 +133,16 @@ def pct(v):
         return None
 
 
+def usage_rows(add, hp):
+    """CPU / GPU / RAM bars for an online machine (GPU skipped if the machine doesn't report it)."""
+    for label, val, shown in (("CPU", pct(hp.get("cpu")), hp.get("cpu", "")),
+                              ("GPU", pct(hp.get("gpu")), hp.get("gpu", "")),
+                              ("RAM", ram_pct(hp.get("ram", "")), hp.get("ram", "").replace("G", " GB"))):
+        if val is None and label == "GPU":
+            continue
+        add([(3, label, "dim"), (8, bar(val), level(val)), (19, shown, "normal")])
+
+
 def ram_pct(ram):
     try:
         used, tot = ram.rstrip("G").split("/")
@@ -197,12 +207,7 @@ def build():
         add([(1, "THIS MAC", "heading"), (10, "· " + me, "dim")])
         add()
         if hp.get("up"):
-            for label, val, shown in (("CPU", pct(hp.get("cpu")), hp.get("cpu", "")),
-                                      ("GPU", pct(hp.get("gpu")), hp.get("gpu", "")),
-                                      ("RAM", ram_pct(hp.get("ram", "")), hp.get("ram", "").replace("G", " GB"))):
-                if val is None and label == "GPU":
-                    continue
-                add([(3, label, "dim"), (8, bar(val), level(val)), (19, shown, "normal")])
+            usage_rows(add, hp)
             mlist = hp.get("mlist") or []
             add()
             if mlist:
@@ -238,8 +243,9 @@ def build():
             up = hp.get("up")
             add()
             add([(1, "●" if up else "○", "ok" if up else "bad"), (3, h["name"], "strong"),
-                 (-1, f"{hp.get('cpu','')} · {hp.get('ram','').replace('G',' GB')}" if up else "offline", "dim" if up else "bad")])
-            if up:
+                 (-1, "" if up else "offline", "bad")])
+            if up:                                  # usage only for machines that are switched on
+                usage_rows(add, hp)
                 for name, sz in model_rows(hp.get("mlist") or []):
                     add([(3, "◆ " + name[:20], "normal"), (-1, f"{sz:.1f} GB", "dim")])
                 if hp.get("vms") and hp["vms"] != "-":
