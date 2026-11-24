@@ -86,7 +86,7 @@ gwm web stop       # stop sharing (your hub and sessions keep running)
 It's the same hub (sidebar + terminals) through [Zellij's web client](https://zellij.dev), with four layers of protection:
 
 1. **Local only.** The web server listens on `127.0.0.1`, so nothing on your Wi-Fi or the internet can connect to it. `gwm web` refuses to continue if it's ever bound wider.
-2. **Your tailnet only.** [Tailscale Serve](https://tailscale.com/kb/1312/serve) publishes it over HTTPS with a real `*.ts.net` certificate to *your* devices. It's Serve, not Funnel, so it's never on the public internet.
+2. **Your tailnet only.** [Tailscale Serve](https://tailscale.com/kb/1312/serve) publishes it over HTTPS with a real `*.ts.net` certificate to the devices your tailnet's access rules allow to reach this Mac (just yours, in a personal tailnet; check your rules if you share nodes or have teammates). It's Serve, not Funnel, so it's never on the public internet. `gwm web stop` always removes the route; it would otherwise survive reboots.
 3. **Login token.** Every browser logs in with a token (`gwm web token`). Use `--read-only` for watch-only access, and `gwm web revoke <name>` revokes one; revoking also logs out browsers already using it.
 4. **Only the hub is shared.** Web sharing is enabled for the go-with-me hub, not for your other terminal sessions.
 
