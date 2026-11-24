@@ -11,6 +11,10 @@
 #   gwm who                           which other devices are using each machine right now
 #   gwm kill                          close the hub (sessions keep running)
 #   gwm demo                          try it: the hub with pretend machines (no setup needed)
+# Web (same hub in a browser, on your tailnet only)
+#   gwm web                           start: loopback server + Tailscale Serve (HTTPS) + login token
+#   gwm web stop|status               stop sharing / show what's running and the link
+#   gwm web token [--read-only]       new login token · gwm web tokens · gwm web revoke <name>|--all
 # Sessions
 #   gwm new [name] [--on machine] [--engine e] [--account a] [--folder f]   start a session (asks what's missing)
 #   gwm open <session>                open a tab for a session that isn't running/open yet (starts it)
@@ -578,6 +582,95 @@ cmd_tailscale() {  # set up Tailscale + Tailscale SSH on this Mac, so other mach
   echo "Then add machines with:  $(c 1)gwm add$(c 0)"
 }
 
+# ---------- web access (gwm web) ----------
+# Security model:
+#   1. Zellij's web server listens on 127.0.0.1 only — nothing on your Wi-Fi or the internet can reach it.
+#   2. Tailscale Serve publishes it over HTTPS (real *.ts.net certificate) to devices on YOUR tailnet only
+#      (Serve, not Funnel — never public).
+#   3. Every browser must log in with a Zellij token. Tokens can be read-only and are revocable; revoking
+#      a token cuts off browsers already logged in with it.
+WEB_PORT=8082        # local, loopback only
+WEB_HTTPS_PORT=8443  # on your tailnet
+web_url() { local d; d="$(tailscale status --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)"; echo "https://$d:$WEB_HTTPS_PORT/$HUBNAME"; }
+web_online() { zellij --config "$DIR/hub.zellij.kdl" web --status --timeout 3 2>/dev/null | grep -qi online; }
+serve_on()   { tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$WEB_PORT"; }
+ts_serve() {  # run `tailscale serve ...`; use sudo only if Tailscale says this user isn't allowed to
+  local err; err="$(tailscale serve "$@" 2>&1 >/dev/null)" && return 0
+  if grep -qiE 'access denied|permission|operator|not permitted' <<<"$err"; then
+    echo "Tailscale needs admin rights to publish this — enter $(c 1)your Mac password$(c 0) if asked"
+    echo "$(c 2)  (to skip this in future: sudo tailscale set --operator=$USER)$(c 0)"
+    sudo tailscale serve "$@"
+  else echo "$err" >&2; return 1; fi
+}
+cmd_web() {
+  local sub="${1:-start}"; shift || true
+  case "$sub" in
+  start)
+    command -v zellij >/dev/null || die "zellij not installed (brew install zellij)"
+    ts_running || die "Tailscale isn't running on this Mac — run: gwm tailscale"
+    [ -n "$(self_name)" ] || die "run 'gwm init' first"
+    for v in $(env | sed -n 's/^\(CLAUDECODE\|CLAUDE_CODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+    unset TERM_SESSION_ID SHELL_SESSION_ID
+    # 1. the hub (started in the background if it isn't running; nothing inside it is auto-launched)
+    if ! hub_running; then
+      zellij delete-session "$HUBNAME" >/dev/null 2>&1; write_layout
+      zellij --config "$DIR/hub.zellij.kdl" --layout "$CFG/hub-layout.kdl" attach --create-background "$HUBNAME" >/dev/null 2>&1 \
+        || die "couldn't start the hub in the background"
+      echo "$(c 32)✓$(c 0) hub started in the background"
+    else
+      echo "$(c 32)✓$(c 0) hub is running $(c 2)(if it was opened before you updated go-with-me, run gwm kill once so it can be shared)$(c 0)"
+    fi
+    # 2. the local web server — loopback only
+    if ! web_online; then
+      zellij --config "$DIR/hub.zellij.kdl" web --daemonize >/dev/null 2>&1 || die "couldn't start the web server"
+      sleep 1
+    fi
+    local binds; binds="$(lsof -nP -iTCP:$WEB_PORT -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}')"
+    if [ -z "$binds" ]; then
+      zellij --config "$DIR/hub.zellij.kdl" web --stop >/dev/null 2>&1; die "the web server didn't come up on 127.0.0.1:$WEB_PORT"
+    fi
+    if grep -vqE '^(127\.0\.0\.1|\[::1\]):' <<<"$binds"; then
+      zellij --config "$DIR/hub.zellij.kdl" web --stop >/dev/null 2>&1
+      die "the web server was listening beyond this Mac ($binds) — stopped it (check web_server_ip in hub.zellij.kdl)"
+    fi
+    echo "$(c 32)✓$(c 0) web server on 127.0.0.1:$WEB_PORT (this Mac only)"
+    # 3. publish to the tailnet over HTTPS (Serve settings persist across reboots, so they're re-checked every start)
+    if ! tailscale status --json 2>/dev/null | python3 -c 'import sys,json; sys.exit(0 if json.load(sys.stdin).get("CertDomains") else 1)'; then
+      echo "$(c 33)•$(c 0) Your tailnet doesn't have HTTPS certificates turned on yet (needed so browsers get a real https:// link)."
+      echo "  Turn on $(c 1)HTTPS Certificates$(c 0) at https://login.tailscale.com/admin/dns , then run: gwm web"; exit 1
+    fi
+    if ! serve_on; then
+      ts_serve --bg --https=$WEB_HTTPS_PORT "http://127.0.0.1:$WEB_PORT" || die "couldn't publish with Tailscale Serve"
+    fi
+    echo "$(c 32)✓$(c 0) published to your tailnet only over HTTPS (Tailscale Serve, not Funnel)"
+    # 4. a login token, the first time
+    if ! zellij web --list-tokens 2>/dev/null | grep -q .; then
+      echo; echo "$(c 1)Your login token$(c 0) — shown once. Save it in your password manager:"
+      zellij web --create-token 2>/dev/null | grep -iE '^[a-z0-9_]+: ' | sed 's/^/  /'
+      echo "  (more tokens: gwm web token · read-only: gwm web token --read-only · revoke: gwm web revoke <name>)"
+    fi
+    echo; echo "Open on any of your Tailscale devices:  $(c 1)$(web_url)$(c 0)"
+    echo "$(c 2)Anyone with a token gets a terminal on this Mac — treat tokens like passwords. Stop sharing: gwm web stop$(c 0)" ;;
+  stop)
+    tailscale serve --https=$WEB_HTTPS_PORT off >/dev/null 2>&1 || { serve_on && sudo tailscale serve --https=$WEB_HTTPS_PORT off >/dev/null 2>&1; } || true
+    zellij --config "$DIR/hub.zellij.kdl" web --stop >/dev/null 2>&1
+    echo "$(c 32)✓$(c 0) Web access stopped (nothing published, server off). Your hub and sessions keep running." ;;
+  status)
+    web_online && echo "web server   $(c 32)on$(c 0)  127.0.0.1:$WEB_PORT" || echo "web server   off"
+    serve_on && echo "tailnet      $(c 32)published$(c 0)  $(web_url)" || echo "tailnet      not published"
+    echo "tokens:"; zellij web --list-tokens 2>/dev/null | sed 's/^/  /' | grep . || echo "  (none)" ;;
+  token)
+    local ro=""; [ "${1:-}" = "--read-only" ] && ro=1
+    echo "New $( [ -n "$ro" ] && echo "read-only " )login token — shown once:"
+    if [ -n "$ro" ]; then zellij web --create-read-only-token 2>/dev/null; else zellij web --create-token 2>/dev/null; fi | grep -iE '^[a-z0-9_]+: ' | sed 's/^/  /' ;;
+  tokens) zellij web --list-tokens 2>/dev/null | grep . || echo "(no tokens)" ;;
+  revoke)
+    [ -n "${1:-}" ] || die "usage: gwm web revoke <token-name> | --all"
+    if [ "$1" = --all ]; then zellij web --revoke-all-tokens; else zellij web --revoke-token "$1"; fi ;;
+  *) die "usage: gwm web [start|stop|status|token [--read-only]|tokens|revoke <name>|--all]" ;;
+  esac
+}
+
 # ---------- adding machines ----------
 discover() {  # print "address<TAB>description" for machines we can see: Tailscale peers + Macs on this Wi-Fi with Remote Login on
   tailscale status --json 2>/dev/null | python3 -c '
@@ -779,6 +872,7 @@ case "${1:-open}" in
           exec "${SHELL:-/bin/zsh}" -l ;;
   sidebar) exec python3 "$DIR/sidebar.py" "$ME" ;;
   tailscale) cmd_tailscale ;;
+  web) shift; cmd_web "$@" ;;
   init) cmd_init "${2:-}" ;;  add) shift; cmd_add "$@" ;;  remove) [ $# -ge 2 ] || die "usage: gwm remove <machine>"; cmd_remove "$2" ;;  sync) [ $# -ge 2 ] || die "usage: gwm sync <host>"; cmd_sync "$2" ;;
   edit) ${EDITOR:-nano} "$HOSTS" "$SESSIONS" ;;
   -h|--help|help) awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$ME" ;;
