@@ -2,19 +2,19 @@
 
 This takes about 10 minutes for two Macs. Want to look around first? `./go-with-me demo` needs no setup.
 
-- [1. Install (on every Mac)](#1-install-on-every-mac)
-- [2. Name your first Mac](#2-name-your-first-mac)
-- [3. Add your other Macs](#3-add-your-other-macs)
-- [4. Open the hub](#4-open-the-hub)
-- [5. Use it away from home (Tailscale)](#5-use-it-away-from-home-tailscale)
+- [1. Install](#1-install)
+- [2. Choose how your Macs connect](#2-choose-how-your-macs-connect): **Tailscale** (recommended) or **Remote Login**
+- [3. Name your first Mac](#3-name-your-first-mac)
+- [4. Add your other Macs](#4-add-your-other-macs)
+- [5. Open the hub](#5-open-the-hub)
 - [6. Optional extras](#6-optional-extras): work + personal accounts, local models, VMs, always-on server
 - [Troubleshooting](#troubleshooting)
 
 ---
 
-## 1. Install (on every Mac)
+## 1. Install
 
-You only need to do this on the Mac you start from. `gwm add` installs go-with-me on the others for you, but they need **Homebrew** and **Remote Login**.
+On the Mac you start from (`gwm add` installs it on the others for you):
 
 ```bash
 # Homebrew, if you don't have it: https://brew.sh
@@ -22,45 +22,86 @@ brew install zellij tmux
 git clone https://github.com/Vayras/go-with-me ~/go-with-me && ~/go-with-me/install.sh
 ```
 
-Open a new terminal window afterwards so `gwm` is on your PATH.
+Open a new terminal window afterwards so `gwm` is on your PATH. You'll also want [Claude Code](https://claude.com/claude-code) on the Macs where you'll run Claude sessions.
 
-**On every Mac you want to reach**, turn on **Remote Login**:
-System Settings → General → Sharing → **Remote Login** → on.
-Click **ⓘ** and make sure *Allow access for* includes your user (or *All users*).
+## 2. Choose how your Macs connect
 
-You'll also want [Claude Code](https://claude.com/claude-code) on the Macs where you'll run Claude sessions.
+| | **A. Tailscale** (recommended) | **B. Remote Login** |
+|---|---|---|
+| Works away from home | ✅ anywhere | ❌ same Wi-Fi only (unless you set up your own VPN) |
+| macOS Remote Login | not needed | must be on for every Mac |
+| SSH keys | none; Tailscale vouches for you | set up for you by `gwm add` (password once) |
+| Needs | a free [Tailscale](https://tailscale.com) account | nothing extra |
 
-## 2. Name your first Mac
+You can mix them: some Macs over Tailscale, some over Remote Login.
+
+### A. Tailscale
+
+**On this Mac:**
+```bash
+gwm tailscale
+```
+It installs the open-source Tailscale, starts it (asks for your Mac password), signs you in (opens a link), and turns on **Tailscale SSH**.
+
+**On each other Mac** (go-with-me isn't there yet, so use the plain commands):
+```bash
+brew install tailscale
+sudo brew services start tailscale
+sudo tailscale up --ssh          # sign in with the SAME Tailscale account
+```
+
+> **Why the command-line Tailscale and not the app?** On a Mac, only the open-source `tailscaled` can *accept* SSH logins. The App Store and standalone apps can only connect *out*. If you have the app, quit it first.
+
+**One-time policy tweak.** By default Tailscale asks you to re-login in a browser every 12 hours before each SSH ("check" mode), which would break the live board. In the [admin console → Access controls](https://login.tailscale.com/admin/acls), set the `ssh` rule to `accept` for your own devices:
+
+```jsonc
+"ssh": [
+  {
+    "action": "accept",                 // was "check"
+    "src":    ["autogroup:member"],
+    "dst":    ["autogroup:self"],
+    "users":  ["autogroup:nonroot", "root"]
+  }
+]
+```
+
+### B. Remote Login
+
+**On every Mac you want to reach:** System Settings → General → Sharing → **Remote Login** → on. Click **ⓘ** and make sure *Allow access for* includes your user (or *All users*). That's it; `gwm add` does the keys.
+
+## 3. Name your first Mac
 
 ```bash
 gwm init
 ```
 
-It asks for a short name (e.g. `studio`), works out this Mac's address, creates `~/.config/go-with-me/`, makes an SSH key if you don't have one, and adds a Claude tab for this Mac.
+It asks for a short name (e.g. `studio`), works out this Mac's address (the Tailscale name if Tailscale is on), creates `~/.config/go-with-me/`, makes an SSH key if needed, and adds a Claude tab for this Mac.
 
-## 3. Add your other Macs
+## 4. Add your other Macs
 
 ```bash
-gwm add
+gwm add                    # asks Tailscale or Remote Login
+gwm add --via tailscale    # or choose up front
+gwm add --via ssh
 ```
 
 The wizard:
 
-1. **Finds your Macs.** It lists Tailscale machines and Macs on your Wi-Fi with Remote Login on. Pick a number, or type an address.
-2. **Checks it can connect.** If not, it tells you to turn on Remote Login there.
-3. **Asks your username on that Mac.** It can differ between Macs! Run `whoami` on that Mac if unsure.
-4. **Sets up SSH keys.** The first time, it asks for that Mac's password **once**, then never again.
-5. **Sets up the other direction too**, so the other Mac can reach this one.
-6. **Installs tmux** there if it's missing (via Homebrew).
+1. **Finds your Macs**: your Tailscale machines, or Macs on your Wi-Fi with Remote Login on. Pick a number, or type an address.
+2. **Checks it can connect**, and tells you exactly what to turn on if not.
+3. **Asks your username on that Mac.** It can differ between Macs! Run `whoami` there if unsure.
+4. **Logs in.** Tailscale: no keys needed. Remote Login: copies this Mac's key (asks that Mac's password **once**).
+5. **Checks the other direction**, so the other Mac can reach this one.
+6. **Installs tmux** there if missing.
 7. **Installs go-with-me** there with the same config, so you can open the hub from either Mac.
 8. **Adds a Claude tab** for it.
 
 ```
-$ gwm add
-Looking for machines (Tailscale + this Wi-Fi)…
+$ gwm add --via ssh
+Looking for machines…
   1) Alexs-MacBook-Pro.local              same Wi-Fi · Alex's MacBook Pro
 Pick a number, or type an address [1]:
-✓ Alexs-MacBook-Pro.local is reachable
+✓ Alexs-MacBook-Pro.local is reachable (Remote Login)
 Your username on that Mac [alex]: alexk
 ✓ Logged in as alexk
 ✓ Alexs-MacBook-Pro · 26.6.2 · 24GB · tmux ✓ claude ✓ opencode ✗ ollama ✓
@@ -71,13 +112,9 @@ Short name for it [macbook]:
 ✓ Added session 'macbook'
 ```
 
-Repeat for every Mac. Check everything with:
+Switching a Mac from Remote Login to Tailscale later? Run `gwm add <same-name> --via tailscale`; it replaces the old address. Check everything with `gwm doctor`.
 
-```bash
-gwm doctor
-```
-
-## 4. Open the hub
+## 5. Open the hub
 
 ```bash
 gwm
@@ -94,22 +131,6 @@ gwm
 | Start / open / close sessions | `gwm new` · `gwm open <name>` · `gwm close <name>` |
 
 The first time a Claude tab opens, Claude asks whether to trust the folder. Pick **Yes**.
-
-## 5. Use it away from home (Tailscale)
-
-`.local` names only work on the same Wi-Fi. [Tailscale](https://tailscale.com) gives every Mac a name that works from anywhere, encrypted and free for personal use.
-
-**On each Mac:**
-```bash
-brew install --cask tailscale-app     # then open Tailscale and sign in with the same account everywhere
-```
-(For an always-on server without the app: `brew install tailscale && sudo brew services start tailscale && sudo tailscale up`.)
-
-**Then re-add your Macs**, and pick the Tailscale entries this time (they show as `Tailscale · macOS · online`):
-```bash
-gwm add macbook          # same name → replaces the old address
-```
-`gwm init` and `gwm add` prefer Tailscale names automatically once Tailscale is running.
 
 ## 6. Optional extras
 
@@ -148,7 +169,9 @@ sudo pmset -a autorestart 1    # power back on after an outage
 | `isn't accepting SSH connections` / `Connection refused` | Turn on **Remote Login** on that Mac |
 | `Permission denied (publickey…)` | Wrong username (run `whoami` there), or Remote Login only allows some users (Sharing → Remote Login → ⓘ). Re-run `gwm add` |
 | `Host key verification failed` | That Mac was reinstalled or its address now points at a different machine. Remove the old line from `~/.ssh/known_hosts` (`ssh-keygen -R <address>`) |
-| A machine shows **offline** when you're away | It's using a `.local` address. Set up Tailscale (step 5) |
+| A machine shows **offline** when you're away | It's using a `.local` address (Remote Login). Switch it to Tailscale: `gwm add <name> --via tailscale` |
+| `Tailscale SSH refused the login` | Set the tailnet `ssh` rule to `"action": "accept"` (step 2A), or check the username |
+| Tailscale mode: `isn't accepting SSH connections` | Tailscale SSH is off on that Mac: `sudo tailscale set --ssh` there. The Tailscale *app* can't do this; use the command-line `tailscale` |
 | A machine goes **offline** after a few minutes | It's asleep: `sudo pmset -a sleep 0` on that Mac |
 | `claude: command not found` in a tab | Install Claude Code on that Mac. go-with-me already looks in `~/.local/bin` and Homebrew |
 | A tab says *Disconnected* | Press **Enter** to reconnect. The session kept running on its Mac |

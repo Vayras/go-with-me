@@ -36,8 +36,9 @@
 #   gwm opencode-setup [--on host] [--model name]   point opencode at that host's Ollama
 # Setup
 #   gwm init [name]                   one-time on each machine: name it and create its config
-#   gwm add                           add another machine: finds it, sets up SSH keys both ways,
-#                                     installs tmux + go-with-me there, adds a tab (guided)
+#   gwm tailscale                     set up Tailscale + Tailscale SSH on this Mac (then no Remote Login needed)
+#   gwm add [--via tailscale|ssh]     add another machine (guided): Tailscale, or Remote Login with SSH keys
+#                                     set up both ways; installs tmux + go-with-me there, adds a tab
 #   gwm remove <machine>              remove a machine from your config
 #   gwm sync <host>                   copy hosts/sessions config from another host
 #   gwm edit                          open the config files in your editor
@@ -498,6 +499,41 @@ cmd_init() {
   echo "  Next: add your other machines with  $(c 1)gwm add$(c 0)   ·   then open the hub with  $(c 1)gwm$(c 0)"
 }
 
+# ---------- Tailscale ----------
+ts_running() { tailscale status --json 2>/dev/null | grep -q '"BackendState": *"Running"'; }
+ts_ssh_on()  { tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": *true'; }
+cmd_tailscale() {  # set up Tailscale + Tailscale SSH on this Mac, so other machines can reach it without Remote Login
+  echo "$(c 1)Tailscale for go-with-me$(c 0) — lets your machines reach each other from anywhere, no Remote Login needed."
+  if [ -d /Applications/Tailscale.app ] && ! command -v tailscaled >/dev/null; then
+    echo "$(c 33)•$(c 0) You have the Tailscale app. On a Mac, only the open-source command-line Tailscale can accept SSH logins,"
+    echo "  so go-with-me uses that one. Quit the Tailscale app (menu bar → Quit) before continuing; you can keep it for other things."
+    [ "$(ask "Continue? (y/n)" y)" = y ] || exit 0
+  fi
+  command -v tailscaled >/dev/null || { echo "Installing Tailscale (open-source)…"; brew install tailscale >/dev/null || die "brew install tailscale failed"; }
+  if ! tailscale status >/dev/null 2>&1 && ! tailscale status 2>&1 | grep -qi 'logged out\|NeedsLogin'; then
+    echo "Starting the Tailscale service — enter $(c 1)your Mac password$(c 0) if asked:"
+    sudo brew services start tailscale >/dev/null || die "couldn't start Tailscale"; sleep 3
+  fi
+  if ts_running; then
+    ts_ssh_on || { echo "Turning on Tailscale SSH…"; sudo tailscale set --ssh || die "couldn't turn on Tailscale SSH"; }
+  else
+    echo "Sign in — a link opens below. Use the $(c 1)same Tailscale account$(c 0) on every machine:"
+    sudo tailscale up --ssh || die "Tailscale sign-in didn't finish"
+  fi
+  ts_running || die "Tailscale isn't connected yet — run gwm tailscale again"
+  local addr; addr="$(my_address)"
+  echo "$(c 32)✓$(c 0) Tailscale is on, with Tailscale SSH. This Mac is reachable as $(c 1)$(whoami)@$addr$(c 0) from anywhere."
+  local me; me="$(self_name)"
+  if [ -n "$me" ] && [ -f "$HOSTS" ] && [ "$(hfield "$me" 2 2>/dev/null)" != "$(whoami)@$addr" ]; then
+    upsert_host "$me" "$(whoami)@$addr" "$(hfield "$me" 3 2>/dev/null || echo "this machine")"
+    echo "$(c 32)✓$(c 0) Updated '$me' in your config to its Tailscale address"
+  fi
+  echo
+  echo "One-time, in your Tailscale admin console: make SSH between your own devices not ask for a browser login every 12h."
+  echo "  https://login.tailscale.com/admin/acls  →  in the \"ssh\" section set  $(c 1)\"action\": \"accept\"$(c 0)  (see docs/SETUP.md)"
+  echo "Then add machines with:  $(c 1)gwm add$(c 0)"
+}
+
 # ---------- adding machines ----------
 discover() {  # print "address<TAB>description" for machines we can see: Tailscale peers + Macs on this Wi-Fi with Remote Login on
   tailscale status --json 2>/dev/null | python3 -c '
@@ -514,24 +550,42 @@ for p in (d.get("Peer") or {}).values():
   done | grep -v "^$mine\.local" ; wait
 }
 cmd_add() {
-  local n="" addr="" user="" role="" yes=""
+  local n="" addr="" user="" role="" yes="" via=""
   while [ $# -gt 0 ]; do case "$1" in
     --address) addr="$2"; shift 2;; --user) user="$2"; shift 2;; --role) role="$2"; shift 2;; -y|--yes) yes=1; shift;;
+    --via) via="$2"; shift 2;;
     *) n="$1"; shift;; esac; done
   [ -n "$(self_name)" ] || die "run 'gwm init' on this machine first"
   local me mytarget; me="$(self_name)"; mytarget="$(hfield "$me" 2)"
   echo "$(c 1)Add a machine to go-with-me$(c 0)"
 
+  # 0. how do we connect? Tailscale SSH (no Remote Login, works anywhere) or Remote Login (plain SSH)
+  case "$via" in tailscale|ts) via=tailscale;; ssh|remote-login) via=ssh;; "") ;; *) die "--via must be tailscale or ssh";; esac
+  if [ -z "$via" ] && [ -n "$addr" ]; then
+    case "$addr" in *.ts.net|100.*) via=tailscale;; *) via=ssh;; esac
+  fi
+  if [ -z "$via" ]; then
+    echo "How should go-with-me connect to it?"
+    echo "  1) $(c 1)Tailscale$(c 0)     no Remote Login, no keys, works from anywhere  $(c 2)(recommended)$(c 0)"
+    echo "  2) $(c 1)Remote Login$(c 0)  plain SSH — same Wi-Fi, or any address you can already SSH to"
+    case "$(ask "Choose" 1)" in 2|ssh|r*) via=ssh;; *) via=tailscale;; esac
+  fi
+  if [ "$via" = tailscale ] && ! ts_running; then
+    echo "$(c 33)•$(c 0) Tailscale isn't running on this Mac yet. Set it up with:  $(c 1)gwm tailscale$(c 0)   (then run gwm add again)"
+    echo "  Or use Remote Login instead:  gwm add --via ssh"; exit 1
+  fi
+
   # 1. where is it?
   if [ -z "$addr" ]; then
-    echo "Looking for machines (Tailscale + this Wi-Fi)…"
-    local found; found="$(discover)"
+    echo "Looking for machines…"
+    local found; found="$(discover | if [ "$via" = tailscale ]; then grep -F 'Tailscale'; else cat; fi)"
     if [ -n "$found" ]; then
       printf '%s\n' "$found" | awk -F'\t' '{printf "  %d) %-40s %s\n", NR, $1, $2}'
       local pick; pick="$(ask "Pick a number, or type an address" 1)"
       if [[ "$pick" =~ ^[0-9]+$ ]]; then addr="$(printf '%s\n' "$found" | sed -n "${pick}p" | cut -f1)"; else addr="$pick"; fi
     else
-      echo "  (nothing found — type its Tailscale name, its .local name, or its IP)"
+      [ "$via" = tailscale ] && echo "  (no other Tailscale machines found — sign the other Mac in to the same Tailscale account, or type its name)" \
+                             || echo "  (nothing found — type its .local name or IP)"
       addr="$(ask "Address" "")"
     fi
   fi
@@ -541,10 +595,14 @@ cmd_add() {
   # 2. can we reach it at all?
   if ! nc -z -G 4 "$addr" 22 >/dev/null 2>&1; then
     echo "$(c 31)✗$(c 0) $addr isn't accepting SSH connections."
-    echo "  On that Mac: System Settings → General → Sharing → turn on $(c 1)Remote Login$(c 0), then run gwm add again."
-    echo "  (If it's away from home, both Macs need Tailscale — see docs/SETUP.md.)"; exit 1
+    if [ "$via" = tailscale ]; then
+      echo "  On that Mac, run $(c 1)gwm tailscale$(c 0) (or: sudo tailscale set --ssh) to turn on Tailscale SSH, then run gwm add again."
+    else
+      echo "  On that Mac: System Settings → General → Sharing → turn on $(c 1)Remote Login$(c 0), then run gwm add again."
+      echo "  (Away from home? Use Tailscale instead: gwm add --via tailscale)"
+    fi; exit 1
   fi
-  echo "$(c 32)✓$(c 0) $addr is reachable"
+  echo "$(c 32)✓$(c 0) $addr is reachable ($([ "$via" = tailscale ] && echo "Tailscale SSH" || echo "Remote Login"))"
 
   # 3. which user?
   [ -n "$user" ] || { [ -n "$yes" ] && user="$(whoami)"; } || true
@@ -552,7 +610,15 @@ cmd_add() {
   local t="$user@$addr"
   local sshq=(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 -o LogLevel=ERROR)
 
-  # 4. keys: this machine → it
+  # 4. log in. Tailscale SSH: no keys — Tailscale vouches for you. Remote Login: copy this Mac's key once.
+  if [ "$via" = tailscale ]; then
+    if ! "${sshq[@]}" "$t" true 2>/dev/null; then
+      echo "$(c 31)✗$(c 0) Tailscale SSH refused the login as '$user'. Usually one of:"
+      echo "  • your tailnet's SSH rule is in \"check\" mode (asks for a browser login every 12h) — switch it to \"accept\":"
+      echo "    https://login.tailscale.com/admin/acls → in \"ssh\", set \"action\": \"accept\"   (details: docs/SETUP.md)"
+      echo "  • wrong username — run 'whoami' on that Mac and try: gwm add --via tailscale --user <name> --address $addr"; exit 1
+    fi
+  else
   ensure_key >/dev/null
   if ! "${sshq[@]}" "$t" true 2>/dev/null; then
     echo "This Mac's key isn't trusted there yet. Copying it now — enter $(c 1)$user's password on $addr$(c 0) once:"
@@ -562,6 +628,7 @@ cmd_add() {
       echo "  • wrong username — run 'whoami' on that Mac and try: gwm add --user <name> --address $addr"
       echo "  • Remote Login limited to some users — Sharing → Remote Login → ⓘ → Allow access for: All users"; exit 1
     fi
+  fi
   fi
   echo "$(c 32)✓$(c 0) Logged in as $user"
 
@@ -589,7 +656,14 @@ cmd_add() {
   echo "$(c 32)✓$(c 0) Saved as '$n' → $t"
 
   # 7. the other direction: it → this machine (for gwm on that machine, and its board)
-  local rkey; rkey="$(run_script_target "$t" '[ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -q -t ed25519 -N "" -C "go-with-me@'"$n"'" -f ~/.ssh/id_ed25519; cat ~/.ssh/id_ed25519.pub')"
+  local rkey=""
+  if [ "$via" = tailscale ]; then
+    case "$mytarget" in *.ts.net|*@100.*) ;; *) echo "$(c 33)•$(c 0) This Mac is saved as $mytarget — run $(c 1)gwm tailscale$(c 0) here so '$n' can reach it over Tailscale too";; esac
+    run_script_target "$t" "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 -o LogLevel=ERROR $mytarget true && echo back-ok" 2>/dev/null | grep -q back-ok &&
+      echo "$(c 32)✓$(c 0) '$n' can reach this Mac too" || echo "$(c 33)•$(c 0) '$n' can't reach this Mac yet — run gwm tailscale here (it turns on Tailscale SSH)"
+  else
+    rkey="$(run_script_target "$t" '[ -f ~/.ssh/id_ed25519.pub ] || ssh-keygen -q -t ed25519 -N "" -C "go-with-me@'"$n"'" -f ~/.ssh/id_ed25519; cat ~/.ssh/id_ed25519.pub')"
+  fi
   if [ -n "$rkey" ]; then
     mkdir -p "$HOME/.ssh"; touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"
     grep -qF "$rkey" "$HOME/.ssh/authorized_keys" || echo "$rkey" >> "$HOME/.ssh/authorized_keys"
@@ -654,6 +728,7 @@ case "${1:-open}" in
   vm) shift; cmd_vm "$@" ;;
   models) shift; cmd_models "$@" ;;  pull) shift; cmd_pull "$@" ;;  opencode-setup) shift; cmd_opencode_setup "$@" ;;
   discover) discover ;;
+  tailscale) cmd_tailscale ;;
   init) cmd_init "${2:-}" ;;  add) shift; cmd_add "$@" ;;  remove) [ $# -ge 2 ] || die "usage: gwm remove <machine>"; cmd_remove "$2" ;;  sync) [ $# -ge 2 ] || die "usage: gwm sync <host>"; cmd_sync "$2" ;;
   edit) ${EDITOR:-nano} "$HOSTS" "$SESSIONS" ;;
   -h|--help|help) awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$ME" ;;

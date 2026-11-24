@@ -30,7 +30,7 @@ A **session** is *machine + engine + account + folder*:
 
 | | |
 |---|---|
-| **Machines** | Any Mac (or Linux box) you can SSH to. Works great over [Tailscale](https://tailscale.com), so it works from anywhere. |
+| **Machines** | Any Mac (or Linux box), connected over [Tailscale](https://tailscale.com) (works anywhere, no Remote Login) or plain SSH with Remote Login |
 | **Engines** | `claude` (Claude Code), `opencode` (local models via [Ollama](https://ollama.com), no cloud tokens), `shell` |
 | **Accounts** | Several Claude logins side by side, e.g. `personal` on one tab and `work` on another, each fully separate |
 | **VMs** | `gwm vm create sandbox --on studio` makes a Linux VM ([Lima](https://lima-vm.io)) on your strongest machine; it shows up as a machine with its own sessions |
@@ -44,12 +44,13 @@ A **session** is *machine + engine + account + folder*:
 ```bash
 brew install zellij tmux
 git clone https://github.com/Vayras/go-with-me ~/go-with-me && ~/go-with-me/install.sh   # adds `gwm`
+gwm tailscale   # optional, recommended: connect your Macs from anywhere, no Remote Login needed
 gwm init        # name this Mac
-gwm add         # add your other Macs: finds them, sets up SSH keys both ways, installs everything there
+gwm add         # add your other Macs (Tailscale or Remote Login): sets up access both ways, installs everything there
 gwm             # open the hub
 ```
 
-Each other Mac only needs **Remote Login** turned on (System Settings → General → Sharing) and Homebrew. **📖 Full guide, Tailscale for away-from-home and troubleshooting: [docs/SETUP.md](docs/SETUP.md)**
+**Two ways to connect your Macs:** **Tailscale** (works anywhere, no Remote Login, no SSH keys) or **Remote Login** (plain SSH on the same Wi-Fi). Mix and match. **📖 Full guide and troubleshooting: [docs/SETUP.md](docs/SETUP.md)**
 
 ## Everyday use
 
@@ -62,7 +63,8 @@ Each other Mac only needs **Remote Login** turned on (System Settings → Genera
 | Stop it but keep the tab (Enter in the tab restarts it) | `gwm stop <session>` |
 | See everything at a glance / who's using what | `gwm status` · `gwm who` |
 | Read or type into a session from anywhere | `gwm peek <session>` · `gwm send <session> "text"` |
-| Add / remove a machine | `gwm add` · `gwm remove <machine>` |
+| Add / remove a machine | `gwm add [--via tailscale\|ssh]` · `gwm remove <machine>` |
+| Set up Tailscale on this Mac | `gwm tailscale` |
 | Run a command on a machine | `gwm run <machine> "git status"` |
 | Sign a Claude account in on a machine | `gwm login work --on studio` |
 | Linux VMs | `gwm vm create <name> --on <machine> [--cpus 6 --memory 16]` · `gwm vm list` |
