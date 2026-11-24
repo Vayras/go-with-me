@@ -75,7 +75,7 @@ sudo tailscale up --ssh          # sign in with the SAME Tailscale account
 gwm init
 ```
 
-It asks for a short name (e.g. `studio`), works out this Mac's address (the Tailscale name if Tailscale is on), creates `~/.config/go-with-me/`, makes an SSH key if needed, and adds a Claude tab for this Mac.
+It asks for a short name (e.g. `studio`), works out this Mac's address (the Tailscale name if Tailscale is on), creates `~/.config/go-with-me/` and makes an SSH key if needed. It doesn't start or save any sessions; you create those when you want them with `gwm new`.
 
 ## 4. Add your other Macs
 
@@ -94,7 +94,7 @@ The wizard:
 5. **Checks the other direction**, so the other Mac can reach this one.
 6. **Installs tmux** there if missing.
 7. **Installs go-with-me** there with the same config, so you can open the hub from either Mac.
-8. **Adds a Claude tab** for it.
+8. **Optionally saves a Claude session** on it (it asks; the default is no, since nothing is started unless you want it).
 
 ```
 $ gwm add --via ssh
@@ -109,7 +109,7 @@ Short name for it [macbook]:
 ✓ Saved as 'macbook' → alexk@Alexs-MacBook-Pro.local
 ✓ 'macbook' can reach this Mac too
 ✓ go-with-me installed on 'macbook' (run gwm there)
-✓ Added session 'macbook'
+Also save a Claude Code session on 'macbook'? (y/n) [n]:
 ```
 
 Switching a Mac from Remote Login to Tailscale later? Run `gwm add <same-name> --via tailscale`; it replaces the old address. Check everything with `gwm doctor`.
@@ -120,8 +120,9 @@ Switching a Mac from Remote Login to Tailscale later? Run `gwm add <same-name> -
 gwm
 ```
 
-- **Tab 1 "overview"**: the board (every machine and session) plus the coordinator Claude
-- **Tabs 2, 3, …**: one per running session, numbered by position
+- **The sidebar** (left): *This Mac* in detail (CPU/GPU/RAM, busy with, every loaded model, VMs, who's connected, its sessions) and a compact card per other machine. Only running sessions are listed; click to jump
+- **Tab 1, the coordinator**: a Claude that can see and steer everything. It waits for you to press **Enter**, so it never starts a session you didn't ask for
+- **Tabs 2, 3, …**: one per running session, numbered by position (shown in the sidebar)
 
 | | |
 |---|---|

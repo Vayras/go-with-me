@@ -21,7 +21,7 @@ git clone https://github.com/Vayras/go-with-me && cd go-with-me && ./go-with-me 
 <td width="50%"><img src="docs/session-tab.png" alt="A session"></td>
 </tr>
 <tr>
-<td><b>Just a sidebar and a terminal.</b> The sidebar shows one card per machine (CPU, RAM, loaded models, VMs, <i>which other devices are using it</i>) with that machine's sessions right under it: working, idle or off, plus the tab number. Tab 1 is the <b>coordinator</b>, a Claude you can ask "what's going on?" or "tell the VM to rerun the load test".</td>
+<td><b>Just a sidebar and a terminal.</b> <b>This Mac</b> gets a full card: CPU / GPU / RAM bars, what it's busy with, <b>every loaded model</b> and its size, VMs, which other devices are using it, and its running sessions. <b>Other machines</b> get compact cards with their models and sessions. Only sessions that are <i>running</i> are listed; saved ones collapse to one line. Tab 1 is the <b>coordinator</b>, a Claude that starts when you press Enter.</td>
 <td><b>Click a session to jump in</b> (a stopped one starts). Each session runs on its own machine and <b>keeps running</b> when you close your laptop. <b>Alt+1…9</b> also jumps; <b>n</b> new, <b>x</b> close. Select text with the mouse to copy it.</td>
 </tr>
 </table>
@@ -56,7 +56,7 @@ gwm             # open the hub
 
 | Do this | Command |
 |---|---|
-| Open the hub (only running sessions get a tab) | `gwm` |
+| Open the hub (only running sessions get a tab; nothing new is started) | `gwm` |
 | Start a new session (asks machine / engine / account / folder) | `gwm new` |
 | Open a tab for a session that isn't running | `gwm open <session>` |
 | Close a session and its tab | `gwm close <session>` |

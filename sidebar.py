@@ -18,9 +18,10 @@ ICON = {"claude": "✻", "opencode": "◇", "shell": "$"}
 state = {"self": "", "hosts": [], "sessions": [], "probe": {}, "used": {}, "ok": False}
 tabs = {"list": [], "active": None}
 lock = threading.Lock()
+offset = 0          # sidebar scroll position
 
 # colour pairs
-ACCENT, GREEN, YELLOW, RED, GREY, BLUE, MAGENTA = range(1, 8)
+ACCENT, GREEN, YELLOW, RED, GREY, BLUE, MAGENTA, SEL = range(1, 9)
 
 
 def run(*args, timeout=30):
@@ -51,8 +52,12 @@ def load_data():
             h, kind = p[0], (p[1] if len(p) > 1 else "")
             d = probe.setdefault(h, {"up": False, "sessions": {}})
             if kind == "H":
-                p += [""] * 6
-                d.update(up=True, cpu=p[2], ram=p[3], models=p[4], vms=p[5])
+                p += [""] * 7
+                d.update(up=True, cpu=p[2], ram=p[3], models=p[4], vms=p[5], gpu=p[6], mlist=d.get("mlist", []), top=d.get("top", []))
+            elif kind == "M" and len(p) >= 4:
+                d.setdefault("mlist", []).append((p[2].replace(":latest", ""), p[3], p[4] if len(p) > 4 else ""))
+            elif kind == "P" and len(p) >= 5:
+                d.setdefault("top", []).append((p[2], p[3], p[4]))
             elif kind == "S" and len(p) >= 6:
                 d["sessions"][p[2]] = {"idle": int(p[3] or 0), "att": int(p[4] or 0), "title": p[5]}
     with lock:
@@ -112,8 +117,64 @@ def short_models(m):
 
 
 # ---------------------------------------------------------------- layout
+def model_rows(mlist):
+    """[(label, size)] biggest first; same-named models get their format (e.g. 'gguf') so they can be told apart."""
+    names = [m[0] for m in mlist]
+    out = []
+    for name, sz, fmt in sorted(mlist, key=lambda m: -float(m[1])):
+        fmt = {"safetensors": "mlx"}.get(fmt, fmt)
+        out.append((name + (f" ·{fmt}" if names.count(name) > 1 and fmt else ""), float(sz)))
+    return out
+
+
+def pct(v):
+    try:
+        return max(0.0, min(100.0, float(str(v).rstrip("%"))))
+    except ValueError:
+        return None
+
+
+def ram_pct(ram):
+    try:
+        used, tot = ram.rstrip("G").split("/")
+        return 100.0 * float(used) / float(tot)
+    except Exception:
+        return None
+
+
+def bar(p, width=10):
+    if p is None:
+        return ""
+    full = int(round(p / 100 * width))
+    return "▮" * full + "▯" * (width - full)
+
+
+def level(p):
+    return "dim" if p is None else (RED if p >= 85 else (YELLOW if p >= 60 else GREEN))
+
+
+def session_lines(add, sessions, host, active, num):
+    hidden = 0
+    for s in sessions:
+        if s["host"] != host:
+            continue
+        label, col, _ = session_state(s)
+        if label in ("off", "offline") and s["name"] not in num:
+            hidden += 1                      # saved but not running: don't clutter the list
+            continue
+        is_active = active == s["name"]
+        off = label in ("off", "offline")
+        n = num.get(s["name"])
+        st = {"off": "○ off", "offline": "—"}.get(label, ("● " if label == "working" else "· ") + label)
+        add([(1, "▌" if is_active else " ", "mark"),
+             (3, f"{ICON.get(s['engine'], '·')} {s['name']}", "strong" if is_active else ("dim" if off else "normal")),
+             (-4, st, col), (-1, str(n) if n and n < 10 else "", "dim")], ("tab", s["name"]))
+    if hidden:
+        add([(3, f"{hidden} saved · not running", "dim")], ("act", "saved:" + host))
+
+
 def build():
-    """A list of lines. Each line = (segments, target). segments: [(x, text, attr-key)] ; target: ('tab', name) / ('act', key) / None.
+    """A list of lines. Each line = (segments, target). segments: [(x, text, style)] ; target: ('tab', name) / ('act', key) / None.
     x < 0 means right-aligned that many columns from the edge."""
     with lock:
         hosts, sessions, me = list(state["hosts"]), list(state["sessions"]), state["self"]
@@ -128,43 +189,75 @@ def build():
     add([(1, "▌" if active == "overview" else " ", "mark"), (3, "⌂  coordinator", "strong" if active == "overview" else "normal"),
          (-1, str(num.get("overview", "")), "dim")], ("tab", "overview"))
     add([(6, "ask · summarise · delegate", "dim")])
-    add()
-    add()
-    add([(1, "MACHINES", "heading")])
 
-    for h in hosts:
-        hp = probe.get(h["name"], {})
-        up = hp.get("up")
+    # ---- THIS MAC: everything about the machine you're sitting at
+    here = next((h for h in hosts if h["name"] == me), None)
+    if here:
+        hp = probe.get(me, {})
+        add(); add()
+        add([(1, "THIS MAC", "heading"), (10, "· " + me, "dim")])
         add()
-        add([(1, "●" if up else "○", "ok" if up else "bad"),
-             (3, h["name"], "strong"), (4 + len(h["name"]), "· here" if h["name"] == me else "", "dim"),
-             (-1, "" if up else "offline", "bad")])
-        if up:
-            add([(3, f"{hp.get('cpu', '')} cpu · {hp.get('ram', '').replace('G', ' GB')}", "dim")])
-            m = short_models(hp.get("models"))
-            if m:
-                add([(3, "models ", "dim"), (10, m, "normal")])
-            if hp.get("vms") and hp["vms"] != "-":
-                add([(3, "vms    ", "dim"), (10, hp["vms"].replace(":Running", " ▶").replace(":Stopped", " ■"), "normal")])
-            if used.get(h["name"]):
-                add([(3, "in use ", "dim"), (10, used[h["name"]], "used")])
-        mine = [s for s in sessions if s["host"] == h["name"]]
-        if mine:
+        if hp.get("up"):
+            for label, val, shown in (("CPU", pct(hp.get("cpu")), hp.get("cpu", "")),
+                                      ("GPU", pct(hp.get("gpu")), hp.get("gpu", "")),
+                                      ("RAM", ram_pct(hp.get("ram", "")), hp.get("ram", "").replace("G", " GB"))):
+                if val is None and label == "GPU":
+                    continue
+                add([(3, label, "dim"), (8, bar(val), level(val)), (19, shown, "normal")])
+            top = hp.get("top") or []
+            if top:
+                add()
+                add([(3, "busy with", "dim")])
+                for name, cpu, mem in top[:3]:
+                    add([(5, name[:18], "normal"), (-1, f"{float(cpu):.0f}%", "dim")])
+            mlist = hp.get("mlist") or []
             add()
-        for s in mine:
-            label, col, _ = session_state(s)
-            is_active = active == s["name"]
-            off = label in ("off", "offline")
-            n = num.get(s["name"])
-            st = {"off": "○ off", "offline": "—"}.get(label, ("● " if label == "working" else "· ") + label)
-            add([(1, "▌" if is_active else " ", "mark"),
-                 (3, f"{ICON.get(s['engine'], '·')} {s['name']}", "strong" if is_active else ("dim" if off else "normal")),
-                 (-4, st, col), (-1, str(n) if n and n < 10 else "", "dim")], ("tab", s["name"]))
+            if mlist:
+                total = sum(float(m[1]) for m in mlist)
+                add([(3, f"models loaded · {len(mlist)}", "dim"), (-1, f"{total:.1f} GB", "dim")])
+                for name, sz in model_rows(mlist):
+                    add([(5, name[:22], "normal"), (-1, f"{sz:.1f} GB", "dim")])
+            else:
+                add([(3, "no models loaded", "dim")])
+            if hp.get("vms") and hp["vms"] != "-":
+                add()
+                add([(3, "vms", "dim"), (8, hp["vms"].replace(":Running", " ▶").replace(":Stopped", " ■"), "normal")])
+            if used.get(me):
+                add()
+                add([(3, "in use by", "dim"), (13, used[me], "used")])
+        else:
+            add([(3, "status unavailable", "bad")])
+        if any(s["host"] == me for s in sessions):
+            add()
+            add([(3, "sessions", "dim")])
+            before = len(L)
+            session_lines(add, sessions, me, active, num)
+            if len(L) == before:
+                L.pop(); L.pop()
+
+    # ---- OTHER MACHINES: compact cards
+    others = [h for h in hosts if h["name"] != me]
+    if others:
+        add(); add()
+        add([(1, "OTHER MACHINES", "heading")])
+        for h in others:
+            hp = probe.get(h["name"], {})
+            up = hp.get("up")
+            add()
+            add([(1, "●" if up else "○", "ok" if up else "bad"), (3, h["name"], "strong"),
+                 (-1, f"{hp.get('cpu','')} · {hp.get('ram','').replace('G',' GB')}" if up else "offline", "dim" if up else "bad")])
+            if up:
+                for name, sz in model_rows(hp.get("mlist") or []):
+                    add([(3, "◆ " + name[:20], "normal"), (-1, f"{sz:.1f} GB", "dim")])
+                if hp.get("vms") and hp["vms"] != "-":
+                    add([(3, "vms " + hp["vms"].replace(":Running", " ▶").replace(":Stopped", " ■"), "normal")])
+                if used.get(h["name"]):
+                    add([(3, "in use by " + used[h["name"]], "used")])
+            session_lines(add, sessions, h["name"], active, num)
 
     if not hosts and ok:
         add([(3, "no machines yet — gwm add", "dim")])
-    add()
-    add()
+    add(); add()
     add([(1, "+  new session", "normal"), (-1, "n", "dim")], ("act", "new"))
     add([(1, "×  close this session", "normal"), (-1, "x", "dim")], ("act", "close"))
     add([(1, "⟳  refresh", "normal"), (-1, "r", "dim")], ("act", "refresh"))
@@ -197,7 +290,7 @@ def attr(key, sel=False):
          "ok": curses.color_pair(GREEN), "bad": curses.color_pair(RED), "used": curses.color_pair(MAGENTA)}.get(key)
     if a is None:
         a = curses.color_pair(key) if isinstance(key, int) else 0
-    return a | (curses.A_REVERSE if sel else 0)
+    return (curses.color_pair(SEL) | curses.A_BOLD) if sel else a
 
 
 def draw(scr, L, cursor):
@@ -219,18 +312,30 @@ def draw(scr, L, cursor):
             pass
 
     footer_h = 2
+    global offset
     tgt = L[cursor][1] if 0 <= cursor < len(L) else None
     if not tgt or tgt[0] != "tab":
         with lock:
             tgt = ("tab", tabs["active"]) if tabs["active"] else None
     det = details(tgt)
     room = H - footer_h - (len(det) + 2 if det else 0)
-    for y, (segs, target) in enumerate(L[: max(room, 0)]):
-        sel = (y == cursor and target is not None)
+    if room < len(L) and det:                # not enough space: drop the details panel first
+        det, room = [], H - footer_h
+    room = max(room, 1)
+    offset = max(0, min(offset, len(L) - room))
+    if 0 <= cursor < len(L):                 # keep the highlighted row on screen
+        offset = min(max(offset, cursor - room + 1), cursor)
+    for y, (segs, target) in enumerate(L[offset: offset + room]):
+        i = y + offset
+        sel = (i == cursor and target is not None)
         if sel:
-            put(y, 0, " " * W, curses.A_REVERSE)
+            put(y, 0, " " * W, curses.color_pair(SEL))
         for x, text, key in segs:
             put(y, x, text, attr(key, sel))
+    if offset > 0:
+        put(0, W - 3, "▲", attr("dim"))
+    if offset + room < len(L):
+        put(room - 1, W - 3, "▼", attr("dim"))
     if det and room > 0:
         y = H - footer_h - len(det) - 1
         put(y - 1, 1, "─" * (W - 2), attr("dim"))
@@ -293,6 +398,11 @@ def activate(target):
                 floating(["bash", "-c", f'{GWM} close "{cur}"; sleep 1'], "close session")
         elif key == "refresh":
             threading.Thread(target=load_data, daemon=True).start()
+        elif key.startswith("saved:"):
+            host = key.split(":", 1)[1]
+            floating(["bash", "-c", f'''echo "Saved sessions on {host} (not running):"; echo
+{GWM} sessions | awk -v h="{host}" 'NR==1 || $2==h'; echo
+read -rp "Start which one? (name, or Enter to cancel) " n; [ -n "$n" ] && {GWM} open "$n"'''], "saved sessions")
         elif key == "help":
             floating(["bash", "-c", HELP_CMD], "keys & tips")
 
@@ -305,6 +415,10 @@ def main(scr):
             curses.init_pair(pair, col, -1)
         except curses.error:
             curses.init_pair(pair, curses.COLOR_WHITE, -1)
+    try:
+        curses.init_pair(SEL, -1, 237)          # selected row: a soft grey band, not inverse video
+    except curses.error:
+        curses.init_pair(SEL, curses.COLOR_WHITE, curses.COLOR_BLACK)
     curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
     curses.mouseinterval(0)
     scr.timeout(400)
@@ -322,10 +436,16 @@ def main(scr):
                 _, mx, my, _, b = curses.getmouse()
             except curses.error:
                 continue
-            if my in clickable and b & (curses.BUTTON1_CLICKED | curses.BUTTON1_RELEASED | curses.BUTTON1_PRESSED):
-                cursor = my
+            global offset
+            if b & getattr(curses, "BUTTON4_PRESSED", 0):
+                offset = max(0, offset - 3); continue
+            if b & getattr(curses, "BUTTON5_PRESSED", 0):
+                offset += 3; continue
+            row = my + offset
+            if row in clickable and b & (curses.BUTTON1_CLICKED | curses.BUTTON1_RELEASED | curses.BUTTON1_PRESSED):
+                cursor = row
                 if b & (curses.BUTTON1_CLICKED | curses.BUTTON1_RELEASED):
-                    activate(L[my][1]); cursor = -1
+                    activate(L[row][1]); cursor = -1
             continue
         if ch in (curses.KEY_DOWN, ord("j")):
             nxt = [i for i in clickable if i > cursor]; cursor = nxt[0] if nxt else cursor
