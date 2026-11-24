@@ -433,7 +433,7 @@ close_tab() {  # close the hub tab for <session>, if open
   renumber_tabs
 }
 sync_session() {  # sync_session add <name> <line> | remove <name>: keep every machine's sessions.conf in step
-  local op="$1" n="$2" line="${3:-}" enc
+  local op="$1" n="$2" line="${3:-}" enc h t
   enc="$(printf '%s\n' "$line" | base64 | tr -d '\n')"
   while IFS=$'\t' read -r h t _; do
     is_local "$h" && continue; case "$t" in vm:*) continue;; esac
@@ -497,10 +497,10 @@ cmd_close() {
   local h; h="$(sfield "$n" 2)"
   if [ -z "$yes" ]; then
     [ -t 0 ] || die "add --yes to confirm closing '$n'"
-    printf "Close '%s'? This stops whatever is running in it on %s and removes its tab. [y/N] " "$n" "$h"; read -r r
+    printf "Close '%s'? It stops on %s and its tab goes away (its screen is saved to the archive first). [y/N] " "$n" "$h"; read -r r
     case "$r" in y|Y|yes) ;; *) echo "Cancelled."; return;; esac
   fi
-  run_script "$h" "tmux kill-session -t '=$PFX$n' 2>/dev/null" || true
+  run_script "$h" "$(archive_cmd "$n"); tmux kill-session -t '=$PFX$n' 2>/dev/null" || true
   awk -F'|' -v n="$n" '{v=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$SESSIONS" > "$SESSIONS.new" && mv "$SESSIONS.new" "$SESSIONS"
   sync_session remove "$n"
   close_tab "$n"
@@ -520,8 +520,11 @@ cmd_history() {  # gwm history <session>|--all [lines]: the session's Claude con
   if [ -n "$a" ] && [ "$a" != default ] && [ "$a" != - ]; then cfgdir="\$HOME/.config/go-with-me/accounts/$a"; else cfgdir="\$HOME/.claude"; fi
   run_script "$(sfield "$n" 2)" "python3 -c \"\$(printf %s $(base64 < "$DIR/history.py" | tr -d '\n') | base64 -d)\" '$n' '$k' $(qfolder "$f") \"$cfgdir\""
 }
+# archive_cmd <session>: save everything on the session's screen (and its scrollback) before it's stopped.
+# Claude's own conversation files (~/.claude/projects) are never touched.
+archive_cmd() { echo "mkdir -p ~/.config/go-with-me/archive && tmux capture-pane -p -J -S - -E - -t '=$PFX$1:' > ~/.config/go-with-me/archive/$1-\$(date +%Y%m%d-%H%M%S).txt 2>/dev/null && echo \"saved its screen to ~/.config/go-with-me/archive/\" ||  true"; }
 cmd_stop() { local n="$1"; need_session "$n"
-  run_script "$(sfield "$n" 2)" "tmux kill-session -t '=$PFX$n' 2>/dev/null; echo 'stopped $n — its tab stays; press Enter there to start it fresh'"; }
+  run_script "$(sfield "$n" 2)" "$(archive_cmd "$n"); tmux kill-session -t '=$PFX$n' 2>/dev/null; echo 'stopped $n — its tab stays; press Enter there to start it fresh'"; }
 cmd_who() {  # who is using which machine right now
   local data map; data="$(probe_all)"; map="$(ip_map)"
   while IFS=$'\t' read -r h _; do

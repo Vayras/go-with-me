@@ -60,7 +60,7 @@ gwm             # open the hub
 | Open the hub (only running sessions get a tab; nothing new is started) | `gwm` |
 | Start a new session (asks machine / engine / account / folder) | `gwm new` |
 | Open a tab for a session that isn't running | `gwm open <session>` |
-| Close a session and its tab | `gwm close <session>` |
+| Close a session and its tab (its screen is saved to `~/.config/go-with-me/archive/` first; Claude chats are kept) | `gwm close <session>` |
 | Stop it but keep the tab (Enter in the tab restarts it) | `gwm stop <session>` |
 | See everything at a glance / who's using what | `gwm status` · `gwm who` |
 | Read or type into a session from anywhere | `gwm peek <session>` · `gwm send <session> "text"` |
