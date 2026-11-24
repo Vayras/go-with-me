@@ -156,6 +156,12 @@ gwm run studio "brew install lima"
 gwm vm create sandbox --on studio --cpus 6 --memory 16
 ```
 
+**Open the hub in a browser** (phone, iPad, another laptop on your tailnet):
+```bash
+gwm web            # first time: turn on "HTTPS Certificates" at https://login.tailscale.com/admin/dns
+```
+It prints a `https://…ts.net:8443/gwm` link and a login token (shown once, so save it). The server only listens on this Mac; Tailscale Serve publishes it to your tailnet only (never the public internet). Use `gwm web token --read-only` for watch-only access, `gwm web revoke <name>` to revoke a token, and `gwm web stop` to stop sharing.
+
 **Keep a server Mac always reachable:**
 ```bash
 sudo pmset -a sleep 0          # never sleep (display can still sleep)
