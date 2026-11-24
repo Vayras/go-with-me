@@ -106,12 +106,13 @@ def build_rows():
 
 def draw(scr, rows, cursor):
     scr.erase()
-    H, W = scr.getmaxyx()
-    W = max(W, 10)
+    H, W0 = scr.getmaxyx()
+    W = max(W0 - 1, 10)          # keep one column of breathing room before the session's border
     with lock:
         active, me = tabs["active"], state["self"]
         probe, used, ok = state["probe"], state["used"], state["ok"]
-    open_names = {t["name"] for t in tabs["list"]}
+        tabnum = {t["name"]: t["pos"] + 1 for t in tabs["list"]}
+    open_names = set(tabnum)
 
     def put(y, x, text, attr=0):
         if 0 <= y < H and x < W:
@@ -120,18 +121,21 @@ def draw(scr, rows, cursor):
             except curses.error:
                 pass
 
+    put(H - 1, 1, "Ctrl+g · window keys   ? help", curses.A_DIM)
+
     for y, (kind, key, data) in enumerate(rows[:H]):
         sel = (y == cursor)
         base = curses.A_REVERSE if sel else 0
         if kind == "title":
             put(y, 1, "go-with-me", curses.color_pair(1) | curses.A_BOLD)
-            put(y, 12, "" if ok else "loading…", curses.A_DIM)
+            put(y, 12, "loading…" if not ok else "", curses.A_DIM)
+            put(y, W - 6, "Alt+#", curses.A_DIM)
         elif kind == "sep":
             put(y, 0, "─" * (W - 1), curses.A_DIM)
         elif kind == "overview":
             a = curses.A_BOLD | (curses.color_pair(6) if active == "overview" else 0)
             put(y, 1, ("▌" if active == "overview" else " ") + "⌂ overview", a | base)
-            put(y, W - 7, "Alt+1", curses.A_DIM)
+            put(y, W - 3, str(tabnum.get("overview", "")), curses.A_DIM)
         elif kind == "host":
             hp = probe.get(key, {})
             up = hp.get("up")
@@ -148,7 +152,9 @@ def draw(scr, rows, cursor):
             put(y, 1, marker, curses.color_pair(6) | curses.A_BOLD)
             put(y, 3, f"{icon} {key}", (curses.A_BOLD if is_active else 0) | (curses.A_DIM if label in ("off", "offline") and key not in open_names else 0) | base)
             st = {"off": "○ off", "offline": "offline"}.get(label, ("● " if label == "working" else "· ") + label)
-            put(y, W - len(st) - 2, st, curses.color_pair(col))
+            num = tabnum.get(key)
+            put(y, W - len(st) - 4, st, curses.color_pair(col))
+            put(y, W - 3, str(num) if num and num < 10 else "", curses.A_DIM)  # Alt+<number> jumps here
         elif kind == "action":
             put(y, 1, data, curses.A_DIM | base if not sel else base)
 
@@ -225,7 +231,9 @@ HELP_CMD = r'''cat <<'EOF'
                 ↑/↓ or j/k then Enter · n new · x close current · r refresh
  Switch tabs    Alt+1…9  ·  Alt+←/→  (Terminal.app: enable "Use Option as Meta key")
  Copy text      select with the mouse — it's copied automatically. Paste with Cmd+V.
- Zellij keys    Ctrl+g first, then follow the bar at the bottom (keys go to Claude until then)
+ Typing         all keys go to the session you're in (Claude, opencode…) — nothing to unlock
+ Window keys    Ctrl+g, then  p ←/→  move between sidebar and session   ·  p f  fullscreen
+                              s  scroll back   ·   Enter  back to typing
  Leave          Ctrl+g → o → d   (everything keeps running) — or just close the window
  From anywhere  gwm status · gwm who · gwm peek <session> · gwm send <session> "text"
 

@@ -282,10 +282,9 @@ tab_layout() {  # tab_layout <session>  → KDL for one session tab
   local label="$n · $e on $h"; [ "$e" = claude ] && label="$label · account: $a"
   printf '  tab name="%s" {\n    pane name="%s" focus=true command="%s" { args "attach" "%s"; }\n  }\n' "$n" "$label" "$ME" "$n"
 }
-bars() {  # every tab: tab bar on top, go-with-me sidebar on the left, the tab's content on the right, key hints at the bottom
-  printf '  default_tab_template {\n    pane size=1 borderless=true { plugin location="zellij:tab-bar"; }\n'
-  printf '    pane split_direction="vertical" {\n      pane size=34 name="go-with-me" command="%s" { args "sidebar"; }\n      children\n    }\n' "$ME"
-  printf '    pane size=2 borderless=true { plugin location="zellij:status-bar"; }\n  }\n'
+bars() {  # every tab: the go-with-me sidebar on the left (the only navigation), the tab's content on the right
+  printf '  default_tab_template {\n    pane split_direction="vertical" {\n'
+  printf '      pane size=34 borderless=true command="%s" { args "sidebar"; }\n      children\n    }\n  }\n' "$ME"
 }
 running_sessions() {  # names of configured sessions that are running right now on their machine
   local data; data="$(probe_all)"
