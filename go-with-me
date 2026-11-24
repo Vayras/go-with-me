@@ -131,9 +131,14 @@ if command -v tmux >/dev/null; then
 fi
 if [ "$(uname)" = Darwin ]; then
   # who is using this machine over SSH: T = interactive terminals (tabs), C = all SSH connections, per source IP
-  who | sed -n "s/.*(\(.*\))\$/\1/p" | sed "s/^fe80:[0-9a-f]*::/fe80::/" | sort | uniq -c | while read -r k ip; do echo "T|$ip|$k"; done
+  who | sed -n "s/.*(\(.*\))\$/\1/p" | sed "s/%.*//; s/^fe80:[0-9a-f]*::/fe80::/" | sort | uniq -c | while read -r k ip; do echo "T|$ip|$k"; done
   lsof -nP -iTCP:22 -sTCP:ESTABLISHED 2>/dev/null | awk "NR>1 && \$1 ~ /sshd/ {print \$9}" | sort -u | sed "s/.*->//" |
     sed "s/:[0-9]*\$//; s/^\[//; s/\]\$//; s/^fe80:[0-9a-f]*::/fe80::/" | sort | uniq -c | while read -r k ip; do echo "C|$ip|$k"; done
+  # Tailscale SSH logins run as: /usr/bin/login -f -pq -h <their tailscale ip> ...  (one per connection)
+  ps -axo tty=,command= | awk "/\/usr\/bin\/login -f .* -h [0-9a-f.:]+ / {for(i=1;i<=NF;i++) if(\$i==\"-h\") print \$1, \$(i+1)}" |
+    while read -r tt ip; do echo "C|$ip|1"; [ "$tt" != "??" ] && echo "T|$ip|1"; done
+  # this machine own addresses, so connections from other machines can be named
+  echo "I|$( { ifconfig 2>/dev/null | awk "/inet6? /{print \$2}"; tailscale ip 2>/dev/null; } | sed "s/%.*//; s/^fe80:[0-9a-f]*::/fe80::/" | grep -vE "^(127\.|::1\$|fe80::1\$)" | sort -u | paste -sd, -)"
 fi
 '
 demo_probe() {  # fake but lively data for `gwm demo`
@@ -152,7 +157,7 @@ probe_all() {  # → "host|H|..." and "host|S|..." lines, all hosts in parallel
   [ -n "${GWM_DEMO:-}" ] && { demo_probe; return; }
   local tmp; tmp="$(mktemp -d)"
   while IFS=$'\t' read -r h _; do
-    ( out="$(run_script "$h" "$PROBE" 2>/dev/null | grep -E '^[HSTC]\|')"
+    ( out="$(run_script "$h" "$PROBE" 2>/dev/null | grep -E '^[HSTCI]\|')"
       [ -n "$out" ] || out="DOWN"; printf '%s\n' "$out" | sed "s/^/$h|/" > "$tmp/$h" ) &
   done < <(hosts)
   wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
@@ -166,12 +171,15 @@ ip_map() {  # "ip<TAB>hostname" for every SSH host, resolved from this machine (
     else dscacheutil -q host -a name "$hn" 2>/dev/null | awk -v h="$h" '/ip_address|ipv6_address/{ip=$2; sub(/^fe80:[0-9a-f]*::/,"fe80::",ip); if(ip!="::1" && ip!="127.0.0.1" && ip!="fe80::1") printf "%s\t%s\n", ip, h}'; fi
   done < <(hosts)
 }
+probe_ip_map() {  # "ip<TAB>host" from each machine's own reported addresses (I| lines)
+  grep '|I|' <<<"$1" | while IFS='|' read -r h _ ips; do tr ',' '\n' <<<"$ips" | sed "s/\$/	$h/"; done
+}
 used_by() {  # used_by <host> <probe data> <ip map>  → "macbook: 2 tabs, 1 agent"
-  local h="$1" data="$2" map="$3" me; me="$(self_name)"
-  grep "^$h|C|" <<<"$data" | while IFS='|' read -r _ _ ip conns; do
+  local h="$1" data="$2" map me; me="$(self_name)"; map="$(probe_ip_map "$data"; printf '%s\n' "$3")"
+  grep "^$h|C|" <<<"$data" | awk -F'|' '{n[$3]+=$4} END{for(i in n) print "x|C|" i "|" n[i]}' | while IFS='|' read -r _ _ ip conns; do
     local who tabs agents
     who="$(awk -F'\t' -v ip="$ip" '$1==ip{print $2; exit}' <<<"$map")"; [ -n "$who" ] || who="$ip"
-    tabs="$(grep "^$h|T|$ip|" <<<"$data" | cut -d'|' -f4)"; tabs="${tabs:-0}"
+    tabs="$(grep "^$h|T|$ip|" <<<"$data" | awk -F'|' '{t+=$4} END{print t+0}')"
     agents=$((conns - tabs)); [ "$who" = "$me" ] && [ "$h" != "$me" ] && agents=$((agents - 1))   # minus this status check
     [ "$agents" -lt 0 ] && agents=0
     printf '%s %s %s\n' "$who" "$tabs" "$agents"
@@ -182,8 +190,24 @@ used_by() {  # used_by <host> <probe data> <ip map>  → "macbook: 2 tabs, 1 age
       if(s) out=out (out?"; ":"") w ": " s}
     print out}'
 }
+probe_cached() {  # probe_cached <max-age-seconds>: one SSH sweep shared by the board and every sidebar
+  local cache="$CFG/.probe-cache" lock="$CFG/.probe-lock" age=999 max="${1:-5}"
+  [ -f "$cache" ] && age=$(( $(date +%s) - $(stat -f %m "$cache" 2>/dev/null || echo 0) ))
+  [ -d "$lock" ] && [ $(( $(date +%s) - $(stat -f %m "$lock" 2>/dev/null || echo 0) )) -gt 60 ] && rmdir "$lock" 2>/dev/null
+  if [ "$age" -gt "$max" ] && mkdir "$lock" 2>/dev/null; then
+    probe_all > "$cache.tmp.$$" && mv "$cache.tmp.$$" "$cache"; rmdir "$lock" 2>/dev/null
+  elif [ ! -f "$cache" ]; then probe_all; return; fi
+  cat "$cache"
+}
+cmd_data() {  # machine-readable state for the sidebar
+  local data map; data="$(probe_cached 5)"; map="$(ip_map)"
+  printf '#SELF\t%s\n' "$(self_name)"
+  hosts | sed 's/^/#HOST	/'; sessions | sed 's/^/#SESS	/'
+  while IFS=$'\t' read -r h _; do printf '#USED\t%s\t%s\n' "$h" "$(used_by "$h" "$data" "$map")"; done < <(hosts)
+  printf '%s\n' "$data"
+}
 print_table() {
-  local data cols map; data="$(probe_all)"; map="$(ip_map)"; cols=$(tput cols 2>/dev/null || echo 140)
+  local data cols map; data="$(probe_cached "${GWM_MAXAGE:-0}")"; map="$(ip_map)"; cols=$(tput cols 2>/dev/null || echo 140)
   printf "$(c '1;38;5;214')%-12s %-13s %5s %-9s %-22s %-16s %s$(c 0)\n" HOST STATUS CPU RAM "MODELS LOADED" "VMs" "USED BY (other devices)"
   while IFS=$'\t' read -r h t role; do
     line="$(grep "^$h|H|" <<<"$data")"
@@ -215,7 +239,7 @@ print_table() {
 }
 cmd_board() {
   while true; do
-    out="$(print_table 2>&1)"
+    out="$(GWM_MAXAGE=4 print_table 2>&1)"
     [ "${ZELLIJ_SESSION_NAME:-}" = "$HUBNAME" ] && renumber_tabs   # also fixes numbers after tabs are moved/closed by hand
     clear
     printf "$(c 2)go-with-me · %s · refreshes every 5s · * = someone attached$(c 0)\n\n%s\n" "$(date +%H:%M:%S)" "$out"
@@ -256,20 +280,20 @@ hub_running() { zellij list-sessions -n 2>/dev/null | grep -E "^$HUBNAME " | gre
 tab_layout() {  # tab_layout <session>  → KDL for one session tab
   local n="$1" h e a; h="$(sfield "$n" 2)"; e="$(sfield "$n" 3)"; a="$(sfield "$n" 4)"
   local label="$n · $e on $h"; [ "$e" = claude ] && label="$label · account: $a"
-  printf '  tab name="%s" {\n    pane name="%s" command="%s" { args "attach" "%s"; }\n  }\n' "$n" "$label" "$ME" "$n"
+  printf '  tab name="%s" {\n    pane name="%s" focus=true command="%s" { args "attach" "%s"; }\n  }\n' "$n" "$label" "$ME" "$n"
 }
-BARS='  default_tab_template {
-    pane size=1 borderless=true { plugin location="zellij:tab-bar"; }
-    children
-    pane size=2 borderless=true { plugin location="zellij:status-bar"; }
-  }'
+bars() {  # every tab: tab bar on top, go-with-me sidebar on the left, the tab's content on the right, key hints at the bottom
+  printf '  default_tab_template {\n    pane size=1 borderless=true { plugin location="zellij:tab-bar"; }\n'
+  printf '    pane split_direction="vertical" {\n      pane size=34 name="go-with-me" command="%s" { args "sidebar"; }\n      children\n    }\n' "$ME"
+  printf '    pane size=2 borderless=true { plugin location="zellij:status-bar"; }\n  }\n'
+}
 running_sessions() {  # names of configured sessions that are running right now on their machine
   local data; data="$(probe_all)"
   while IFS=$'\t' read -r n h _; do grep -q "^$h|S|$n|" <<<"$data" && echo "$n"; done < <(sessions)
 }
 write_layout() {  # only sessions that are already running get a tab; others are opened with `gwm open <name>`
   local i=1 n
-  { echo "layout {"; echo "$BARS"
+  { echo "layout {"; bars
     printf '  tab name="1 overview" focus=true split_direction="horizontal" {\n'
     printf '    pane name="STATUS BOARD · every machine and session · refreshes every 5s" size="40%%" command="%s" { args "board"; }\n' "$ME"
     if [ -n "${GWM_DEMO:-}" ]; then printf '    pane name="COORDINATOR · ask about or hand work to any session" focus=true command="bash" { args "%s"; }\n  }\n' "$DIR/demo/coordinator.sh"
@@ -303,7 +327,7 @@ open_tab() {  # open (or jump to) the hub tab for <session>
   hub_running || return 1
   if hub_tabs | cut -f3 | grep -qx "$1"; then
     zellij --session "$HUBNAME" action go-to-tab-by-id "$(hub_tabs | awk -F'\t' -v n="$1" '$3==n{print $1; exit}')" >/dev/null 2>&1; return 0; fi
-  local tmp="$CFG/tab-$1.kdl"; { echo "layout {"; echo "$BARS"; tab_layout "$1" | sed '1s/^  tab [^{]*{/  tab {/'; echo "}"; } > "$tmp"
+  local tmp="$CFG/tab-$1.kdl"; { echo "layout {"; bars; tab_layout "$1" | sed '1s/^  tab [^{]*{/  tab {/'; echo "}"; } > "$tmp"
   zellij --session "$HUBNAME" action new-tab --name "$1" --layout "$tmp" >/dev/null 2>&1; rm -f "$tmp"
   renumber_tabs
 }
@@ -728,6 +752,8 @@ case "${1:-open}" in
   vm) shift; cmd_vm "$@" ;;
   models) shift; cmd_models "$@" ;;  pull) shift; cmd_pull "$@" ;;  opencode-setup) shift; cmd_opencode_setup "$@" ;;
   discover) discover ;;
+  _data) cmd_data ;;
+  sidebar) exec python3 "$DIR/sidebar.py" "$ME" ;;
   tailscale) cmd_tailscale ;;
   init) cmd_init "${2:-}" ;;  add) shift; cmd_add "$@" ;;  remove) [ $# -ge 2 ] || die "usage: gwm remove <machine>"; cmd_remove "$2" ;;  sync) [ $# -ge 2 ] || die "usage: gwm sync <host>"; cmd_sync "$2" ;;
   edit) ${EDITOR:-nano} "$HOSTS" "$SESSIONS" ;;

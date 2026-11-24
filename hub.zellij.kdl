@@ -28,3 +28,7 @@ session_serialization false
 
 show_setup_screen false
 show_release_notes false
+
+// Copying: select text with the mouse and it's on your clipboard (paste with Cmd+V)
+copy_command "pbcopy"
+copy_on_select true

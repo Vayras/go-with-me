@@ -21,7 +21,7 @@ git clone https://github.com/Vayras/go-with-me && cd go-with-me && ./go-with-me 
 <td width="50%"><img src="docs/session-tab.png" alt="A session tab"></td>
 </tr>
 <tr>
-<td><b>Overview tab.</b> Every machine (CPU, RAM, loaded models, VMs, <i>which other devices are using it</i>) and every session (working / idle / current task). Below it, a <b>coordinator</b> Claude you can ask "what's going on?" or "tell the VM to rerun the load test".</td>
+<td><b>Overview tab.</b> A <b>sidebar</b> on the left of every tab lists your machines and sessions with live status; click one to jump there, or use + new / × close. Every machine (CPU, RAM, loaded models, VMs, <i>which other devices are using it</i>) and every session (working / idle / current task). Below it, a <b>coordinator</b> Claude you can ask "what's going on?" or "tell the VM to rerun the load test".</td>
 <td><b>One tab per session.</b> Each session runs on its own machine and <b>keeps running</b> when you close your laptop. Tabs are numbered by position and renumber themselves; <b>Alt+1…9</b> jumps straight to one.</td>
 </tr>
 </table>
@@ -69,9 +69,10 @@ gwm             # open the hub
 | Sign a Claude account in on a machine | `gwm login work --on studio` |
 | Linux VMs | `gwm vm create <name> --on <machine> [--cpus 6 --memory 16]` · `gwm vm list` |
 | Local models | `gwm models --on studio` · `gwm pull <model>` · `gwm opencode-setup --on studio` |
+| Copy text | Select it with the mouse; it's copied automatically. Paste with Cmd+V |
 | Leave the hub (everything keeps running) | **Ctrl+g → o → d**, or close the window |
 
-**In the hub:** click tabs and panes with the mouse. Keys go straight to Claude or opencode until you press **Ctrl+g**; the bottom bar then shows what each key does. **Alt+1…9** and **Alt+←/→** switch tabs at any time (Terminal.app: enable *Use Option as Meta key*).
+**In the hub:** the **sidebar** (left) lists every machine and session: click to jump, **n** new, **x** close, **?** help. Click tabs and panes with the mouse; select text to copy. Keys go straight to Claude or opencode until you press **Ctrl+g**; the bottom bar then shows what each key does. **Alt+1…9** and **Alt+←/→** switch tabs at any time (Terminal.app: enable *Use Option as Meta key*).
 
 ## Config
 
