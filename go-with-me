@@ -293,10 +293,9 @@ running_sessions() {  # names of configured sessions that are running right now 
 write_layout() {  # only sessions that are already running get a tab; others are opened with `gwm open <name>`
   local i=1 n
   { echo "layout {"; bars
-    printf '  tab name="1 overview" focus=true split_direction="horizontal" {\n'
-    printf '    pane name="STATUS BOARD · every machine and session · refreshes every 5s" size="40%%" command="%s" { args "board"; }\n' "$ME"
-    if [ -n "${GWM_DEMO:-}" ]; then printf '    pane name="COORDINATOR · ask about or hand work to any session" focus=true command="bash" { args "%s"; }\n  }\n' "$DIR/demo/coordinator.sh"
-    else printf '    pane name="COORDINATOR · ask about or hand work to any session" focus=true command="claude" cwd="%s"\n  }\n' "$DIR/coordinator"; fi
+    printf '  tab name="1 overview" focus=true {\n'
+    if [ -n "${GWM_DEMO:-}" ]; then printf '    pane focus=true command="bash" { args "%s"; }\n  }\n' "$DIR/demo/coordinator.sh"
+    else printf '    pane focus=true command="claude" cwd="%s"\n  }\n' "$DIR/coordinator"; fi
     for n in $(running_sessions); do i=$((i+1)); tab_layout "$n" | sed "1s/tab name=\"$n\"/tab name=\"$i $n\"/"; done
     echo "}"; } > "$CFG/hub-layout.kdl"
 }

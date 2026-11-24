@@ -17,12 +17,12 @@ git clone https://github.com/Vayras/go-with-me && cd go-with-me && ./go-with-me 
 
 <table>
 <tr>
-<td width="50%"><img src="docs/hub-overview.png" alt="Overview tab"></td>
-<td width="50%"><img src="docs/session-tab.png" alt="A session tab"></td>
+<td width="50%"><img src="docs/hub-overview.png" alt="Sidebar and coordinator"></td>
+<td width="50%"><img src="docs/session-tab.png" alt="A session"></td>
 </tr>
 <tr>
-<td><b>Overview tab.</b> A <b>sidebar</b> on the left of every tab lists your machines and sessions with live status; click one to jump there, or use + new / × close. Every machine (CPU, RAM, loaded models, VMs, <i>which other devices are using it</i>) and every session (working / idle / current task). Below it, a <b>coordinator</b> Claude you can ask "what's going on?" or "tell the VM to rerun the load test".</td>
-<td><b>One tab per session.</b> Each session runs on its own machine and <b>keeps running</b> when you close your laptop. Tabs are numbered by position and renumber themselves; <b>Alt+1…9</b> jumps straight to one.</td>
+<td><b>Just a sidebar and a terminal.</b> The sidebar shows one card per machine (CPU, RAM, loaded models, VMs, <i>which other devices are using it</i>) with that machine's sessions right under it: working, idle or off, plus the tab number. Tab 1 is the <b>coordinator</b>, a Claude you can ask "what's going on?" or "tell the VM to rerun the load test".</td>
+<td><b>Click a session to jump in</b> (a stopped one starts). Each session runs on its own machine and <b>keeps running</b> when you close your laptop. <b>Alt+1…9</b> also jumps; <b>n</b> new, <b>x</b> close. Select text with the mouse to copy it.</td>
 </tr>
 </table>
 
@@ -37,7 +37,7 @@ A **session** is *machine + engine + account + folder*:
 
 <img src="docs/status.png" alt="gwm status" width="100%">
 
-`gwm status` shows the same board in any terminal. `gwm who` tells you which devices are connected to which machine.
+Outside the hub, `gwm status` prints the same information as a table, and `gwm who` lists which devices are connected to which machine.
 
 ## Quick start
 
@@ -96,9 +96,9 @@ local         | studio  | opencode | -       | ~/code
 
 Plain bash, no daemon or server:
 
-- **Zellij** draws the hub on the machine you're sitting at.
+- **Zellij** draws the hub on the machine you're sitting at: a Python **sidebar** (curses) beside each session's terminal.
 - Each session lives in a **hidden tmux** on its own machine (no status bar, no prefix key; it's only there so sessions survive disconnects). Tabs reconnect to it over **SSH**.
-- The board polls every machine over SSH every 5 s: CPU/RAM, Ollama's loaded models, Lima VMs, tmux sessions, and incoming SSH connections (that's the **used by** column).
+- The sidebar's data comes from one shared SSH sweep of every machine (cached a few seconds): CPU/RAM, Ollama's loaded models, Lima VMs, tmux sessions, and incoming SSH/Tailscale connections (that's **in use**).
 - **Accounts** = a separate `CLAUDE_CONFIG_DIR` per label on each machine.
 - The **coordinator** is a normal Claude Code session with instructions to use `gwm status / peek / send / run`. It asks before sending to a session or changing anything.
 

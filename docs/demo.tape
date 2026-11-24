@@ -16,40 +16,44 @@ Sleep 500ms
 Type "./go-with-me demo" Sleep 400ms Enter
 Sleep 20s
 Screenshot docs/hub-overview.png
-Sleep 2s
+Sleep 1s
+
+# into the sidebar → landing-page
 Ctrl+g
-Sleep 300ms
-Type "t"
-Sleep 300ms
-Right
-Sleep 300ms
+Type "p"
+Left
+Enter
+Sleep 600ms
+Down
+Sleep 400ms
+Down
+Sleep 800ms
 Enter
 Sleep 7s
 Screenshot docs/session-tab.png
+
+# sidebar → api-tests
 Ctrl+g
-Sleep 300ms
-Type "t"
-Sleep 300ms
-Right
-Sleep 300ms
+Type "p"
+Left
+Enter
+Sleep 600ms
+Down 4
+Sleep 800ms
 Enter
 Sleep 7s
+
+# sidebar → coordinator
 Ctrl+g
-Sleep 300ms
-Type "t"
-Sleep 300ms
-Right
-Sleep 300ms
+Type "p"
+Left
 Enter
-Sleep 5s
-Ctrl+g
-Sleep 300ms
-Type "t"
-Sleep 300ms
-Left 3
-Sleep 300ms
+Sleep 600ms
+Down
+Sleep 600ms
 Enter
-Sleep 4s
+Sleep 3s
+
 Hide
 Ctrl+g
 Type "o"
