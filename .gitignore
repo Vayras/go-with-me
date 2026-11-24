@@ -1,0 +1,4 @@
+.DS_Store
+*.bak
+*.new
+# personal config lives in ~/.config/go-with-me, never in this repo

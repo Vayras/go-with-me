@@ -1,0 +1,328 @@
+#!/bin/bash
+# go-with-me — one terminal for all your machines, accounts, VMs and models.
+#
+#   Tab 0 "overview": live board of every host + session, and a coordinator Claude that can see/steer them all.
+#   Tab 1..N: one per session. A session = a host + an engine (claude | opencode | shell) + an account + a folder.
+#   Sessions live in tmux on their host, so they keep running when you disconnect.
+#
+# Hub
+#   gwm                               open the hub (or re-attach)
+#   gwm status | board                one-shot status / live board
+#   gwm kill                          close the hub (sessions keep running)
+# Sessions
+#   gwm sessions                      list sessions
+#   gwm attach <session>              connect to a session (what each tab runs)
+#   gwm peek <session> [lines]        show a session's screen
+#   gwm send <session> <text...>      type text + Enter into a session
+#   gwm restart <session>             kill and restart a session
+# Hosts
+#   gwm hosts                         list hosts
+#   gwm run <host> <command...>       run a shell command on a host
+#   gwm doctor                        check every host is reachable and ready
+# Accounts (separate Claude logins, e.g. personal + work)
+#   gwm accounts [--on host]          show which account is logged in where
+#   gwm login <account> [--on host]   sign an account in on a host
+# VMs (Linux, via Lima — run them on your strongest machine)
+#   gwm vm create <name> [--on host] [--cpus N] [--memory GB] [--disk GB]
+#   gwm vm list|start|stop|delete [name] [--on host]
+# Local models (Ollama) + opencode
+#   gwm models [--on host]            installed + loaded models
+#   gwm pull <model> [--on host]      download a model
+#   gwm opencode-setup [--on host] [--model name]   point opencode at that host's Ollama
+# Setup
+#   gwm init <this-host-name>         one-time: create config, say which host this machine is
+#   gwm sync <host>                   copy hosts/sessions config from another host
+#   gwm edit                          open the config files in your editor
+
+set -u
+SCRIPT="$(readlink "$0" 2>/dev/null || echo "$0")"
+case "$SCRIPT" in /*) ;; *) SCRIPT="$(cd "$(dirname "$0")" && pwd)/$(basename "$SCRIPT")";; esac
+DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+ME="$DIR/go-with-me"
+CFG="${GWM_CONFIG:-$HOME/.config/go-with-me}"
+HOSTS="$CFG/hosts.conf"; SESSIONS="$CFG/sessions.conf"; SELF_FILE="$CFG/self"
+SOCK=gwm; HUB=hub; PFX=gwm-
+ACCT_DIR='$HOME/.config/go-with-me/accounts'   # expanded on the target host
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+
+c() { [ -t 1 ] && printf '\033[%sm' "$1" || true; }
+die() { echo "go-with-me: $*" >&2; exit 1; }
+b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+self_name() { [ -f "$SELF_FILE" ] && cat "$SELF_FILE" || true; }
+
+# ---------- config ----------
+rows() {  # rows <file> <ncols>  → tab-separated, trimmed, comments skipped
+  [ -f "$1" ] || die "missing $1 — run: gwm init <this-host-name>"
+  awk -F'|' -v n="$2" '/^[[:space:]]*#/||/^[[:space:]]*$/{next}
+    {o=""; for(i=1;i<=n;i++){v=$i; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); o=o (i>1?"\t":"") v} print o}' "$1"
+}
+hosts()    { rows "$HOSTS" 3; }      # name target role
+sessions() { rows "$SESSIONS" 5; }   # name host engine account folder
+hfield() { hosts    | awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f; ok=1} END{exit !ok}'; }
+sfield() { sessions | awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f; ok=1} END{exit !ok}'; }
+need_host()    { hfield "$1" 1 >/dev/null || die "unknown host '$1' (gwm hosts)"; }
+need_session() { sfield "$1" 1 >/dev/null || die "unknown session '$1' (gwm sessions)"; }
+is_local() { [ "$1" = "$(self_name)" ]; }
+
+# ---------- running things on hosts ----------
+# run_script <host> <script>   non-interactive; works for this machine, SSH hosts and Lima VMs
+run_script() {
+  local h="$1" s="$2" t; t="$(hfield "$h" 2)"
+  case "$t" in
+    vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
+          run_script "$parent" "limactl shell --workdir / $vm -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
+    *) if is_local "$h"; then printf '%s\n' "$s" | env -u TMUX "${SHELL:-/bin/zsh}" -l -s
+       else printf '%s\n' "$s" | ssh -o BatchMode=yes -o ConnectTimeout=4 -o ServerAliveInterval=5 \
+              -o ServerAliveCountMax=2 -o LogLevel=ERROR "$t" 'exec "$SHELL" -l -s'; fi ;;
+  esac
+}
+# run_tty <host> <command>   interactive (needs a terminal)
+run_tty() {
+  local h="$1" s="$2" t; t="$(hfield "$h" 2)"
+  case "$t" in
+    vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
+          run_tty "$parent" "limactl shell --workdir / $vm -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
+    *) if is_local "$h"; then env -u TMUX "${SHELL:-/bin/zsh}" -lc "$s"
+       else ssh -t -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o LogLevel=ERROR \
+              "$t" "exec \"\$SHELL\" -lc \"\$(printf %s $(b64 "$s") | base64 -d)\""; fi ;;
+  esac
+}
+# --on <host> option parsing (default: this machine)
+ON=""; ARGS=()
+parse_on() { ON="$(self_name)"; ARGS=(); while [ $# -gt 0 ]; do
+  case "$1" in --on) ON="$2"; shift 2;; *) ARGS+=("$1"); shift;; esac; done; need_host "$ON"; }
+
+# ---------- status ----------
+PROBE='
+if [ "$(uname)" = Darwin ]; then
+  cpu=$(top -l 2 -n 0 -s 1 2>/dev/null | awk "/CPU usage/{u=\$3+\$5} END{printf \"%d%%\", u}")
+  pg=$(sysctl -n hw.pagesize); tot=$(( $(sysctl -n hw.memsize) / 1073741824 ))
+  used=$(vm_stat | awk -v ps=$pg "/Anonymous pages/{a=\$3} /wired down/{w=\$4} /occupied by compressor/{c=\$5} END{gsub(/\\./,\"\",a);gsub(/\\./,\"\",w);gsub(/\\./,\"\",c); printf \"%.0f\", (a+w+c)*ps/1073741824}")
+else
+  read -r _ a b c d _ < /proc/stat; sleep 1; read -r _ a2 b2 c2 d2 _ < /proc/stat
+  cpu="$(( 100 * ((a2+b2+c2)-(a+b+c)) / ((a2+b2+c2+d2)-(a+b+c+d) + 1) ))%"
+  tot=$(awk "/MemTotal/{printf \"%.0f\", \$2/1048576}" /proc/meminfo)
+  used=$(awk "/MemTotal/{t=\$2} /MemAvailable/{a=\$2} END{printf \"%.0f\", (t-a)/1048576}" /proc/meminfo)
+fi
+models=$(curl -s -m 1 http://127.0.0.1:11434/api/ps 2>/dev/null | grep -o "\"name\":\"[^\"]*\"" | cut -d\" -f4 | sort -u | paste -sd, -)
+vms=$(command -v limactl >/dev/null && limactl list --format "{{.Name}}:{{.Status}}" 2>/dev/null | paste -sd, -)
+echo "H|$cpu|$used/${tot}G|${models:--}|${vms:-}"
+if command -v tmux >/dev/null; then
+  now=$(date +%s)
+  tmux list-sessions -F "#{session_name}|#{session_activity}|#{session_attached}|#{pane_title}" 2>/dev/null | grep "^gwm-" |
+  while IFS="|" read -r n act att title; do echo "S|${n#gwm-}|$((now-act))|$att|$(echo "$title" | tr "|" "/")"; done
+fi
+'
+probe_all() {  # → "host|H|..." and "host|S|..." lines, all hosts in parallel
+  local tmp; tmp="$(mktemp -d)"
+  while IFS=$'\t' read -r h _; do
+    ( out="$(run_script "$h" "$PROBE" 2>/dev/null | grep -E '^[HS]\|')"
+      [ -n "$out" ] || out="DOWN"; printf '%s\n' "$out" | sed "s/^/$h|/" > "$tmp/$h" ) &
+  done < <(hosts)
+  wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
+}
+print_table() {
+  local data cols; data="$(probe_all)"; cols=$(tput cols 2>/dev/null || echo 140)
+  printf "$(c '1;38;5;214')%-12s %-13s %5s %-9s %-26s %s$(c 0)\n" HOST STATUS CPU RAM "MODELS LOADED" "VMs"
+  while IFS=$'\t' read -r h t role; do
+    line="$(grep "^$h|H|" <<<"$data")"
+    if [ -n "$line" ]; then
+      IFS='|' read -r _ _ cpu ram models vms <<<"$line"
+      st="● on"; is_local "$h" && st="● on (here)"; case "$t" in vm:*) st="● vm";; esac
+      printf "%-12s $(c 32)%-15s$(c 0) %5s %-9s %-26.26s %s\n" "$h" "$st" "$cpu" "$ram" "$models" "$vms" | cut -c1-$((cols+12))
+    else
+      printf "%-12s $(c 31)%-15s$(c 0) %s\n" "$h" "○ offline" "asleep / off / not set up → gwm doctor"
+    fi
+  done < <(hosts)
+  echo
+  printf "$(c '1;38;5;110')%-14s %-10s %-9s %-10s %-12s %s$(c 0)\n" SESSION HOST ENGINE ACCOUNT STATE "CURRENT TASK"
+  while IFS=$'\t' read -r n h e a f; do
+    line="$(grep "^$h|S|$n|" <<<"$data")"
+    if [ -n "$line" ]; then
+      IFS='|' read -r _ _ _ idle att title <<<"$line"
+      if [ "$idle" -lt 8 ]; then st="working"; elif [ "$idle" -lt 3600 ]; then st="idle $((idle/60))m"; else st="idle $((idle/3600))h"; fi
+      [ "$att" -gt 0 ] && st="$st *"
+      col=32; [ "${st%% *}" = working ] && col=33
+      printf "%-14s %-10s %-9s %-10s $(c $col)%-12s$(c 0) %s\n" "$n" "$h" "$e" "$a" "$st" "$title" | cut -c1-$((cols+12))
+    elif grep -q "^$h|H|" <<<"$data"; then
+      printf "%-14s %-10s %-9s %-10s $(c 2)%-12s$(c 0)\n" "$n" "$h" "$e" "$a" "not started"
+    else
+      printf "%-14s %-10s %-9s %-10s $(c 31)%-12s$(c 0)\n" "$n" "$h" "$e" "$a" "host offline"
+    fi
+  done < <(sessions)
+}
+cmd_board() {
+  while true; do
+    out="$(print_table 2>&1)"; clear
+    printf "$(c 2)go-with-me · %s · refreshes every 5s · * = someone attached$(c 0)\n\n%s\n" "$(date +%H:%M:%S)" "$out"
+    sleep 5
+  done
+}
+
+# ---------- sessions ----------
+start_cmd() {  # the command that creates-or-attaches session <name> on its host
+  local n="$1" e a f env="" prog
+  e="$(sfield "$n" 3)"; a="$(sfield "$n" 4)"; f="$(sfield "$n" 5)"; [ -n "$f" ] || f="~"
+  [ -n "$a" ] && [ "$a" != default ] && [ "$a" != - ] && env="-e CLAUDE_CONFIG_DIR=$ACCT_DIR/$a"
+  case "$e" in
+    claude)   prog='claude; exec $SHELL -l' ;;
+    opencode) prog='opencode; exec $SHELL -l' ;;
+    shell)    prog='exec $SHELL -l' ;;
+    *) die "session '$n': unknown engine '$e' (use claude, opencode or shell)" ;;
+  esac
+  [ -n "$env" ] && echo "mkdir -p $ACCT_DIR/$a; cd $f 2>/dev/null || cd; tmux new-session -A -s $PFX$n $env '$prog'" \
+                || echo "cd $f 2>/dev/null || cd; tmux new-session -A -s $PFX$n '$prog'"
+}
+cmd_attach() {
+  local n="$1" h; need_session "$n"; h="$(sfield "$n" 2)"
+  while true; do
+    clear; echo "Connecting to $n on $h …"
+    run_tty "$h" "$(start_cmd "$n")"
+    echo; echo "$(c 33)Disconnected from $n.$(c 0) If it was running, it keeps running on $h."
+    printf "Enter = reconnect · Ctrl+a & = close this tab: "; read -r _ || exit 0
+  done
+}
+cmd_open() {
+  command -v tmux >/dev/null || die "tmux not installed (brew install tmux)"
+  [ -n "$(self_name)" ] || die "run 'gwm init <this-host-name>' first"
+  if ! tmux -L $SOCK has-session -t $HUB 2>/dev/null; then
+    tmux -L $SOCK -f "$DIR/hub.tmux.conf" new-session -d -s $HUB -n overview -x 200 -y 50 "$ME board"
+    tmux -L $SOCK split-window -v -l 70% -t $HUB:overview -c "$DIR/coordinator" 'claude; exec $SHELL -l'
+    while IFS=$'\t' read -r n _; do tmux -L $SOCK new-window -d -t $HUB -n "$n" "$ME attach $n"; done < <(sessions)
+    tmux -L $SOCK select-window -t $HUB:overview
+  fi
+  [ -n "${GWM_NO_ATTACH:-}" ] && return 0
+  if [ -n "${TMUX:-}" ]; then env -u TMUX tmux -L $SOCK attach -t $HUB; else exec tmux -L $SOCK attach -t $HUB; fi
+}
+cmd_peek() { local n="$1" k="${2:-40}"; need_session "$n"
+  run_script "$(sfield "$n" 2)" "tmux capture-pane -p -J -t $PFX$n -S -$k 2>/dev/null | awk 'NF{p=NR} {l[NR]=\$0} END{for(i=1;i<=p;i++) print l[i]}' || echo '(session $n is not running)'"; }
+cmd_send() { local n="$1"; shift; need_session "$n"
+  run_script "$(sfield "$n" 2)" "printf %s $(b64 "$*") | base64 -d | tmux load-buffer -b gwm - && tmux paste-buffer -d -b gwm -t $PFX$n && sleep 0.3 && tmux send-keys -t $PFX$n Enter && echo 'sent to $n'"; }
+cmd_restart() { local n="$1"; need_session "$n"
+  run_script "$(sfield "$n" 2)" "tmux kill-session -t $PFX$n 2>/dev/null; echo 'stopped $n — it starts fresh next time its tab connects (press Enter there)'"; }
+
+# ---------- hosts ----------
+cmd_run() { local h="$1"; shift; need_host "$h"; run_script "$h" "cd ~ && eval \"\$(printf %s $(b64 "$*") | base64 -d)\""; }
+cmd_doctor() {
+  while IFS=$'\t' read -r h t role; do
+    printf "$(c 1)%s$(c 0)  %s\n" "$h" "$(is_local "$h" && echo "(this machine)" || echo "$t")"
+    out="$(run_script "$h" 'echo reach-ok; for x in tmux claude opencode ollama limactl; do command -v $x >/dev/null && echo "$x-ok"; done; [ "$(uname)" = Darwin ] && pmset -g | awk "/ sleep /{print \"sleep=\"\$2}"' 2>&1)"
+    if ! grep -q reach-ok <<<"$out"; then
+      echo "  $(c 31)✗ unreachable:$(c 0) $(tail -1 <<<"$out")"
+      case "$t" in vm:*) echo "    → start it: gwm vm start ${t#*/} --on ${t#vm:}" | sed 's#/[^ ]*$##';;
+        *) echo "    → on $h: System Settings → General → Sharing → Remote Login ON"
+           echo "    → then on $h:  ssh $(hfield "$(self_name)" 2 2>/dev/null) cat .ssh/id_ed25519.pub >> ~/.ssh/authorized_keys";; esac
+      continue
+    fi
+    for x in tmux claude opencode ollama limactl; do
+      grep -q "^$x-ok" <<<"$out" && printf "  $(c 32)✓$(c 0) %s" "$x" || printf "  $(c 2)· %s$(c 0)" "$x"; done; echo
+    s="$(grep sleep= <<<"$out" | cut -d= -f2)"
+    [ -n "$s" ] && { [ "$s" = 0 ] && echo "  $(c 32)✓$(c 0) never sleeps" || echo "  $(c 33)•$(c 0) sleeps after $s min (servers: sudo pmset -a sleep 0)"; }
+  done < <(hosts)
+}
+
+# ---------- accounts ----------
+cmd_accounts() {
+  parse_on "$@"
+  run_script "$ON" '
+show() { s=$(env ${1:+CLAUDE_CONFIG_DIR="$1"} claude auth status 2>/dev/null)
+  if echo "$s" | grep -q "\"loggedIn\": true"; then echo "logged in  $(echo "$s" | grep -o "\"email\": *\"[^\"]*\"" | cut -d\" -f4)"; else echo "not logged in"; fi; }
+setopt NULL_GLOB 2>/dev/null || true
+printf "%-12s %s\n" default "$(show "")"
+for d in $HOME/.config/go-with-me/accounts/*/; do [ -d "$d" ] && printf "%-12s %s\n" "$(basename "$d")" "$(show "${d%/}")"; done'
+}
+cmd_login() {
+  local a; parse_on "$@"; a="${ARGS[0]:-}"; [ -n "$a" ] || die "usage: gwm login <account> [--on host]"
+  if [ "$a" = default ]; then run_tty "$ON" "claude auth login"
+  else run_tty "$ON" "mkdir -p $ACCT_DIR/$a && CLAUDE_CONFIG_DIR=$ACCT_DIR/$a claude auth login"; fi
+}
+
+# ---------- VMs ----------
+cmd_vm() {
+  local sub="${1:-list}"; shift || true; parse_on "$@"; local name="${ARGS[0]:-}"
+  run_script "$ON" 'command -v limactl >/dev/null' || die "Lima isn't installed on $ON (run there: brew install lima)"
+  case "$sub" in
+    list)  run_script "$ON" "limactl list" ;;
+    start|stop) [ -n "$name" ] || die "usage: gwm vm $sub <name> [--on host]"; run_script "$ON" "limactl $sub $name" ;;
+    delete) [ -n "$name" ] || die "usage: gwm vm delete <name> [--on host]"
+      run_script "$ON" "limactl delete --force $name" && {
+        sed -i '' "/^$name[[:space:]]*|[[:space:]]*vm:/d" "$HOSTS"; sed -i '' "/^$name[[:space:]]*|[[:space:]]*$name[[:space:]]*|/d" "$SESSIONS"
+        echo "Deleted VM $name and removed it from your config."; } ;;
+    create)
+      [ -n "$name" ] || die "usage: gwm vm create <name> [--on host] [--cpus N] [--memory GB] [--disk GB]"
+      local cpus=4 mem=8 disk=60 i=1
+      while [ $i -lt ${#ARGS[@]} ]; do case "${ARGS[$i]}" in
+        --cpus) cpus="${ARGS[$((i+1))]}";; --memory) mem="${ARGS[$((i+1))]}";; --disk) disk="${ARGS[$((i+1))]}";; esac; i=$((i+2)); done
+      echo "Creating Linux VM '$name' on $ON ($cpus CPUs, ${mem}GB RAM, ${disk}GB disk). First time downloads Ubuntu (~600MB)…"
+      run_script "$ON" "limactl create --name=$name --cpus=$cpus --memory=$mem --disk=$disk --tty=false template:default && limactl start $name" || die "VM creation failed"
+      echo "Installing tmux, git and Claude Code inside the VM…"
+      run_script "$ON" "limactl shell --workdir / $name -- bash -lc 'sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux git curl >/dev/null && curl -fsSL https://claude.ai/install.sh | bash'"
+      grep -q "^$name[[:space:]]*|" "$HOSTS" || printf '%-12s | vm:%s/%s | Linux VM on %s (%s CPU, %sGB)\n' "$name" "$ON" "$name" "$ON" "$cpus" "$mem" >> "$HOSTS"
+      grep -q "^$name[[:space:]]*|" "$SESSIONS" || printf '%-14s | %-10s | claude   | default  | ~\n' "$name" "$name" >> "$SESSIONS"
+      echo "Done. Added host + session '$name'. Sign Claude in inside it:  gwm login default --on $name"
+      echo "Restart the hub to get its tab:  gwm kill && gwm" ;;
+    *) die "usage: gwm vm create|list|start|stop|delete" ;;
+  esac
+}
+
+# ---------- local models ----------
+cmd_models() { parse_on "$@"; run_script "$ON" 'command -v ollama >/dev/null || { echo "Ollama not installed (brew install ollama && brew services start ollama)"; exit; }
+echo "INSTALLED"; ollama list; echo; echo "LOADED IN MEMORY"; ollama ps'; }
+cmd_pull() { parse_on "$@"; [ -n "${ARGS[0]:-}" ] || die "usage: gwm pull <model> [--on host]"; run_tty "$ON" "ollama pull ${ARGS[0]}"; }
+cmd_opencode_setup() {
+  parse_on "$@"; local model="" i=0
+  while [ $i -lt ${#ARGS[@]} ]; do [ "${ARGS[$i]}" = --model ] && model="${ARGS[$((i+1))]}"; i=$((i+1)); done
+  run_script "$ON" "
+f=\$HOME/.config/opencode/opencode.json; mkdir -p \$(dirname \$f); [ -f \$f ] && cp \$f \$f.bak
+ollama list 2>/dev/null | awk 'NR>1{print \$1}' > /tmp/gwm-models
+python3 - \"\$f\" '$model' <<'PY'
+import json, sys, os
+path, want = sys.argv[1], sys.argv[2]
+cfg = json.load(open(path)) if os.path.exists(path) else {}
+models = [m.strip() for m in open('/tmp/gwm-models') if m.strip()]
+cfg.setdefault('\$schema', 'https://opencode.ai/config.json')
+prov = cfg.setdefault('provider', {})
+prov.pop('lmstudio', None)
+prov['ollama'] = {'npm': '@ai-sdk/openai-compatible', 'name': 'Ollama (local)',
+                  'options': {'baseURL': 'http://127.0.0.1:11434/v1'},
+                  'models': {m: {'name': m} for m in models}}
+pick = want or next((m for m in models if 'inkling' in m), models[0] if models else '')
+if pick: cfg['model'] = 'ollama/' + pick
+json.dump(cfg, open(path, 'w'), indent=2)
+print('opencode → Ollama with', len(models), 'models; default:', pick or '(none installed yet)')
+PY"
+}
+
+# ---------- setup ----------
+cmd_init() {
+  local n="${1:-}"; [ -n "$n" ] || die "usage: gwm init <this-host-name>"
+  mkdir -p "$CFG/accounts"
+  [ -f "$HOSTS" ]    || cp "$DIR/examples/hosts.conf" "$HOSTS"
+  [ -f "$SESSIONS" ] || cp "$DIR/examples/sessions.conf" "$SESSIONS"
+  echo "$n" > "$SELF_FILE"
+  hfield "$n" 1 >/dev/null 2>&1 || echo "Note: '$n' isn't in $HOSTS yet — add a line for it (gwm edit)."
+  echo "This machine is '$n'. Config: $CFG"
+}
+cmd_sync() { local h="$1"; need_host "$h"
+  for f in hosts.conf sessions.conf; do run_script "$h" "cat ~/.config/go-with-me/$f" > "$CFG/$f.new" && mv "$CFG/$f.new" "$CFG/$f"; done
+  echo "Copied hosts + sessions config from $h."; }
+
+case "${1:-open}" in
+  open) cmd_open ;;  board) cmd_board ;;  status) print_table ;;
+  kill) tmux -L $SOCK kill-server 2>/dev/null; echo "Hub closed. Sessions keep running on their hosts." ;;
+  sessions) sessions | awk -F'\t' 'BEGIN{printf "%-14s %-10s %-9s %-10s %s\n","SESSION","HOST","ENGINE","ACCOUNT","FOLDER"} {printf "%-14s %-10s %-9s %-10s %s\n",$1,$2,$3,$4,$5}' ;;
+  hosts) hosts | awk -F'\t' '{printf "%-12s %-28s %s\n",$1,$2,$3}' ;;
+  attach)  [ $# -ge 2 ] || die "usage: gwm attach <session>"; cmd_attach "$2" ;;
+  peek)    [ $# -ge 2 ] || die "usage: gwm peek <session> [lines]"; cmd_peek "$2" "${3:-40}" ;;
+  send)    [ $# -ge 3 ] || die "usage: gwm send <session> <text>"; shift; cmd_send "$@" ;;
+  restart) [ $# -ge 2 ] || die "usage: gwm restart <session>"; cmd_restart "$2" ;;
+  run)     [ $# -ge 3 ] || die "usage: gwm run <host> <command>"; shift; cmd_run "$@" ;;
+  doctor) cmd_doctor ;;
+  accounts) shift; cmd_accounts "$@" ;;  login) shift; cmd_login "$@" ;;
+  vm) shift; cmd_vm "$@" ;;
+  models) shift; cmd_models "$@" ;;  pull) shift; cmd_pull "$@" ;;  opencode-setup) shift; cmd_opencode_setup "$@" ;;
+  init) cmd_init "${2:-}" ;;  sync) [ $# -ge 2 ] || die "usage: gwm sync <host>"; cmd_sync "$2" ;;
+  edit) ${EDITOR:-nano} "$HOSTS" "$SESSIONS" ;;
+  -h|--help|help) awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$ME" ;;
+  *) die "unknown command '$1' (gwm help)" ;;
+esac
