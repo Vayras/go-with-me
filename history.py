@@ -22,7 +22,7 @@ def sh(*a):
 
 def find_live():
     """(folder, config dir) of a claude process running in tmux session gwm-<name>, if any."""
-    pane = sh("tmux", "display", "-p", "-t", f"gwm-{name}", "#{pane_pid}")
+    pane = sh("tmux", "display", "-p", "-t", f"=gwm-{name}:", "#{pane_pid}")
     if not pane:
         return None
     procs = {}
@@ -39,7 +39,7 @@ def find_live():
         if q == pane:
             cwd = sh("lsof", "-a", "-p", pid, "-d", "cwd", "-Fn")
             cwd = next((l[1:] for l in cwd.splitlines() if l.startswith("n")), "")
-            env = sh("tmux", "show-environment", "-t", f"gwm-{name}", "CLAUDE_CONFIG_DIR")
+            env = sh("tmux", "show-environment", "-t", f"=gwm-{name}", "CLAUDE_CONFIG_DIR")
             cfg = env.split("=", 1)[1] if env.startswith("CLAUDE_CONFIG_DIR=") else os.path.expanduser("~/.claude")
             return cwd or None, cfg
     return None
@@ -48,7 +48,7 @@ def find_live():
 live = find_live()
 folder, config = (live if live else (fb_folder, fb_config))
 if live and not folder:
-    folder = sh("tmux", "display", "-p", "-t", f"gwm-{name}", "#{pane_current_path}") or fb_folder
+    folder = sh("tmux", "display", "-p", "-t", f"=gwm-{name}:", "#{pane_current_path}") or fb_folder
 slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(folder))
 files = sorted(glob.glob(os.path.join(config, "projects", slug, "*.jsonl")), key=os.path.getmtime, reverse=True)
 if not files:

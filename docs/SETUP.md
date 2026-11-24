@@ -60,7 +60,7 @@ sudo tailscale up --ssh          # sign in with the SAME Tailscale account
     "action": "accept",                 // was "check"
     "src":    ["autogroup:member"],
     "dst":    ["autogroup:self"],
-    "users":  ["autogroup:nonroot", "root"]
+    "users":  ["autogroup:nonroot"]       // never "root": gwm doesn't need it
   }
 ]
 ```
@@ -125,12 +125,16 @@ gwm
 - **Every tab is a plain terminal**: nothing is launched for you. A Claude-type tab shows a hint and has its account set up, so `claude` uses the right login
 - **Tabs 2, 3, …**: one per running session, numbered by position (shown in the sidebar)
 
-| | |
+| Shortcut | Does |
 |---|---|
-| Switch tabs | click them, or **Alt+1…9** / **Alt+←→** (Terminal.app: Settings → Profiles → Keyboard → *Use Option as Meta key*) |
-| Zellij's own keys | **Ctrl+g** first, then follow the bar at the bottom. Until then, all keys go to Claude |
-| Leave (everything keeps running) | **Ctrl+g → o → d**, or just close the window |
-| Start / open / close sessions | `gwm new` · `gwm open <name>` · `gwm close <name>` |
+| **⌥1…9**, **⌥← ⌥→** | jump to a tab, previous / next |
+| **⌥S** | switch between sidebar and terminal |
+| **⌥N** / **⌥X** / **⌥Z** | new pane / close pane / zoom pane |
+| **⌥O** | open or create a session |
+| **⌥Q** | leave the hub (everything keeps running) |
+| **⌥/** | all shortcuts |
+
+⌥ is the Option key. In **Terminal.app**, run `gwm keys --setup` once and open a new window (it turns on *Use Option as Meta key*). iTerm2: Profiles → Keys → Left Option: *Esc+*. Ghostty: `macos-option-as-alt = true`.
 
 The first time you run `claude` in a folder, it asks whether to trust it. Pick **Yes**.
 

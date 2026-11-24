@@ -4,7 +4,7 @@
 Layout, grouped by what belongs together:
   header
   coordinator                       (the overview tab)
-  THIS MAC — CPU/GPU/RAM, every loaded model, VMs, who's using it, its sessions;  OTHER MACHINES — compact cards,
+  THIS MAC — CPU/GPU/RAM, every loaded model, VMs, who's using it, its sessions;  OTHER MACHINES — CPU/GPU/RAM when online,
                                     then that machine's sessions
   actions                           new · close · refresh · help
   details of the highlighted session
@@ -14,7 +14,7 @@ State comes from `gwm _data` (one shared, cached SSH sweep); tabs are driven wit
 import curses, json, os, subprocess, sys, threading, time
 
 GWM = sys.argv[1] if len(sys.argv) > 1 else "gwm"
-ICON = {"claude": "✻", "opencode": "◇", "shell": "$"}
+ICON = {"claude": "✻", "opencode": "◇", "shell": "$", "kimi": "◆", "codex": "◎", "gemini": "✦"}
 state = {"self": "", "hosts": [], "sessions": [], "probe": {}, "used": {}, "ok": False}
 tabs = {"list": [], "active": None}
 lock = threading.Lock()
@@ -34,10 +34,12 @@ def run(*args, timeout=30):
 # ---------------------------------------------------------------- data
 def load_data():
     out = run(GWM, "_data", timeout=45)
-    hosts, sessions, used, probe, me = [], [], {}, {}, ""
+    hosts, sessions, used, probe, me, coord = [], [], {}, {}, "", ""
     for line in out.splitlines():
         if line.startswith("#SELF\t"):
             me = line.split("\t", 1)[1]
+        elif line.startswith("#COORD\t"):
+            coord = line.split("\t", 1)[1]
         elif line.startswith("#HOST\t"):
             p = line.split("\t") + [""] * 4
             hosts.append({"name": p[1], "target": p[2], "role": p[3]})
@@ -60,7 +62,7 @@ def load_data():
             elif kind == "S" and len(p) >= 6:
                 d["sessions"][p[2]] = {"idle": int(p[3] or 0), "att": int(p[4] or 0), "title": p[5]}
     with lock:
-        state.update(self=me, hosts=hosts, sessions=sessions, used=used, probe=probe, ok=bool(hosts))
+        state.update(self=me, coord=coord, hosts=hosts, sessions=sessions, used=used, probe=probe, ok=bool(hosts))
 
 
 def load_tabs():
@@ -133,6 +135,16 @@ def pct(v):
         return None
 
 
+def usage_rows(add, hp):
+    """CPU / GPU / RAM bars for an online machine (GPU skipped if the machine doesn't report it)."""
+    for label, val, shown in (("CPU", pct(hp.get("cpu")), hp.get("cpu", "")),
+                              ("GPU", pct(hp.get("gpu")), hp.get("gpu", "")),
+                              ("RAM", ram_pct(hp.get("ram", "")), hp.get("ram", "").replace("G", " GB"))):
+        if val is None and label == "GPU":
+            continue
+        add([(3, label, "dim"), (8, bar(val), level(val)), (19, shown, "normal")])
+
+
 def ram_pct(ram):
     try:
         used, tot = ram.rstrip("G").split("/")
@@ -180,6 +192,7 @@ def build():
         probe, used, ok = dict(state["probe"]), dict(state["used"]), state["ok"]
         active = tabs["active"]
         num = {t["name"]: t["pos"] + 1 for t in tabs["list"]}
+        coord = state.get("coord", "")
     L = []
     add = lambda segs=(), target=None: L.append((list(segs), target))
 
@@ -187,7 +200,7 @@ def build():
     add()
     add([(1, "▌" if active == "overview" else " ", "mark"), (3, "⌂  coordinator", "strong" if active == "overview" else "normal"),
          (-1, str(num.get("overview", "")), "dim")], ("tab", "overview"))
-    add([(6, "ask · summarise · delegate", "dim")])
+    add([(6, "shared · lives on " + (coord or "?"), "dim")])
 
     # ---- THIS MAC: everything about the machine you're sitting at
     here = next((h for h in hosts if h["name"] == me), None)
@@ -197,12 +210,7 @@ def build():
         add([(1, "THIS MAC", "heading"), (10, "· " + me, "dim")])
         add()
         if hp.get("up"):
-            for label, val, shown in (("CPU", pct(hp.get("cpu")), hp.get("cpu", "")),
-                                      ("GPU", pct(hp.get("gpu")), hp.get("gpu", "")),
-                                      ("RAM", ram_pct(hp.get("ram", "")), hp.get("ram", "").replace("G", " GB"))):
-                if val is None and label == "GPU":
-                    continue
-                add([(3, label, "dim"), (8, bar(val), level(val)), (19, shown, "normal")])
+            usage_rows(add, hp)
             mlist = hp.get("mlist") or []
             add()
             if mlist:
@@ -238,8 +246,9 @@ def build():
             up = hp.get("up")
             add()
             add([(1, "●" if up else "○", "ok" if up else "bad"), (3, h["name"], "strong"),
-                 (-1, f"{hp.get('cpu','')} · {hp.get('ram','').replace('G',' GB')}" if up else "offline", "dim" if up else "bad")])
-            if up:
+                 (-1, "" if up else "offline", "bad")])
+            if up:                                  # usage only for machines that are switched on
+                usage_rows(add, hp)
                 for name, sz in model_rows(hp.get("mlist") or []):
                     add([(3, "◆ " + name[:20], "normal"), (-1, f"{sz:.1f} GB", "dim")])
                 if hp.get("vms") and hp["vms"] != "-":
@@ -335,7 +344,7 @@ def draw(scr, L, cursor):
         for text, key in det:
             while text and y < H - footer_h:
                 put(y, 1, text[: W - 2], attr(key)); text = text[W - 2:]; y += 1
-    put(H - 1, 1, "Ctrl+g window keys · ? help", attr("dim"))
+    put(H - 1, 1, "⌥S sidebar · ⌥/ shortcuts", attr("dim"))
     scr.refresh()
 
 
@@ -349,23 +358,8 @@ def floating(cmd, name):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-HELP_CMD = r'''cat <<'EOF'
- go-with-me — keys & tips
+HELP_CMD = f'{GWM} keys'
 
- Sidebar        click a session to jump to it (opening a stopped one starts it)
-                ↑/↓ or j/k then Enter · n new · x close current · r refresh
- Switch tabs    Alt+1…9 (numbers shown in the sidebar) · Alt+←/→
-                Terminal.app: Settings → Profiles → Keyboard → "Use Option as Meta key"
- Typing         all keys go to the session you're in (Claude, opencode…)
- Copy text      select with the mouse — it's copied. Paste with Cmd+V
- Window keys    Ctrl+g, then  p ←/→  move between sidebar and session  ·  p f  fullscreen
-                              s  scroll back  ·  Enter  back to typing
- Leave          Ctrl+g → o → d  (everything keeps running) — or just close the window
- From anywhere  gwm status · gwm who · gwm peek <session> · gwm send <session> "text"
-
- press any key to close
-EOF
-read -rsn1'''
 
 
 def activate(target):
@@ -383,21 +377,21 @@ def activate(target):
             subprocess.Popen([GWM, "open", key], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif kind == "act":
         if key == "new":
-            floating([GWM, "new"], "new session")
+            floating(["bash", "-c", f'{GWM} new || {{ echo; read -rp "Press Enter to close "; }}'], "new session")
         elif key == "close":
             with lock:
                 cur = tabs["active"]
             if cur and cur != "overview":
-                floating(["bash", "-c", f'{GWM} close "{cur}"; sleep 1'], "close session")
+                floating(["bash", "-c", '"$0" close "$1"; sleep 1', GWM, cur], "close session")
         elif key == "refresh":
             threading.Thread(target=load_data, daemon=True).start()
         elif key.startswith("saved:"):
             host = key.split(":", 1)[1]
-            floating(["bash", "-c", f'''echo "Saved sessions on {host} (not running):"; echo
-{GWM} sessions | awk -v h="{host}" 'NR==1 || $2==h'; echo
-read -rp "Start which one? (name, or Enter to cancel) " n; [ -n "$n" ] && {GWM} open "$n"'''], "saved sessions")
+            floating(["bash", "-c", '''echo "Saved sessions on $1 (not running):"; echo
+"$0" sessions | awk -v h="$1" 'NR==1 || $2==h'; echo
+read -rp "Start which one? (name, or Enter to cancel) " n; [ -n "$n" ] && "$0" open "$n"''', GWM, host], "saved sessions")
         elif key == "help":
-            floating(["bash", "-c", HELP_CMD], "keys & tips")
+            floating(["bash", "-c", HELP_CMD], "shortcuts")
 
 
 def main(scr):

@@ -71,9 +71,20 @@ gwm             # open the hub
 | Linux VMs | `gwm vm create <name> --on <machine> [--cpus 6 --memory 16]` · `gwm vm list` |
 | Local models | `gwm models --on studio` · `gwm pull <model>` · `gwm opencode-setup --on studio` |
 | Copy text | Select it with the mouse; it's copied automatically. Paste with Cmd+V |
-| Leave the hub (everything keeps running) | **Ctrl+g → o → d**, or close the window |
+| Leave the hub (everything keeps running) | **⌥Q**, or close the window |
 
-**In the hub:** the **sidebar** (left) lists every machine and session: click to jump, **n** new, **x** close, **?** help. Click tabs and panes with the mouse; select text to copy. Keys go straight to Claude or opencode until you press **Ctrl+g**; the bottom bar then shows what each key does. **Alt+1…9** and **Alt+←/→** switch tabs at any time (Terminal.app: enable *Use Option as Meta key*).
+**Shortcuts** (⌥ = Option; in Terminal.app run `gwm keys --setup` once so ⌥ works):
+
+| | |
+|---|---|
+| **⌥1…9** · **⌥← ⌥→** | jump to a tab · previous / next |
+| **⌥S** | switch between sidebar and terminal |
+| **⌥N** · **⌥X** · **⌥Z** | new pane · close pane · zoom pane |
+| **⌥O** | open or create a session |
+| **⌥Q** | leave (everything keeps running) |
+| **⌥/** | show all shortcuts (`gwm keys`) |
+
+Click anything in the sidebar too. Select text to copy it.
 
 ## Config
 
@@ -120,6 +131,7 @@ The pieces of go-with-me exist elsewhere; the combination is what's different. W
 
 ## Security notes
 
+- **The coordinator reads every Claude chat** on every machine and account (including work accounts) by default, and it can run commands everywhere. Text it reads could try to steer it (prompt injection), so `coordinator/.claude/settings.json` makes Claude **always ask you** before `gwm run`, `gwm send`, `ssh`, or anything that creates, closes or deletes. Keep it that way, and avoid auto mode in the coordinator.
 - `gwm send` / `gwm run` execute on your machines over SSH. Treat the coordinator like any agent with shell access.
 - Lima VMs mount your home folder **read-only** by default, which makes them good sandboxes.
 - Check your employer's policy before joining work machines or work accounts.
