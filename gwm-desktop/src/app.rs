@@ -37,6 +37,7 @@ struct Tab {
 
 enum JobKind {
     NewSession(String),
+    EndSession(String),
     Send,
     Browser,
 }
@@ -94,6 +95,8 @@ enum Action {
     ToggleSidebar,
     Font(f32),
     Reconnect(usize),
+    EndSession(String),    // ask first
+    ConfirmEnd(String),    // stop it on its machine (gwm close --yes)
 }
 
 pub struct App {
@@ -109,6 +112,8 @@ pub struct App {
     collapsed: HashSet<String>,
     palette: Option<Palette>,
     dialog: Option<NewSession>,
+    confirm_end: Option<String>, // session whose "End session?" dialog is open
+    ending: HashSet<String>,     // sessions being ended right now
     pending: Vec<Pending>,
     jobs: HashMap<u64, Job>,
     next_job: u64,
@@ -137,6 +142,8 @@ impl App {
             collapsed: HashSet::new(),
             palette: None,
             dialog: None,
+            confirm_end: None,
+            ending: HashSet::new(),
             pending: Vec::new(),
             jobs: HashMap::new(),
             next_job: 1,
@@ -154,6 +161,7 @@ impl App {
         match show.as_deref() {
             Some("palette") => app.palette = Some(Palette::default()),
             Some("dialog") => app.open_dialog(None),
+            Some(x) if x.starts_with("end:") => app.confirm_end = Some(x[4..].to_owned()),
             _ => {}
         }
         app
@@ -279,6 +287,16 @@ impl App {
                                 self.toast(format!("Couldn't start '{name}': {last}"), false);
                             }
                         }
+                        JobKind::EndSession(name) => {
+                            let name = name.clone();
+                            self.ending.remove(&name);
+                            self.refresh_now(ctx);
+                            if ok {
+                                self.toast(format!("Ended '{name}' (its screen is in the archive)"), true);
+                            } else {
+                                self.toast(format!("Couldn't end '{name}': {last}"), false);
+                            }
+                        }
                         JobKind::Send => {
                             let msg = if last.is_empty() { title } else { last };
                             self.toast(msg, ok);
@@ -356,6 +374,26 @@ impl App {
                         t.font_size = self.font_size;
                     }
                 }
+                Action::EndSession(name) => {
+                    // only saved sessions (not the coordinator, not one still being created)
+                    if self.state.session(&name).is_some() && !self.ending.contains(&name) {
+                        self.confirm_end = Some(name);
+                    }
+                }
+                Action::ConfirmEnd(name) => {
+                    // optimistic: drop its tab now and show it as ending; JobDone refreshes the list
+                    if let Some(i) = self.tabs.iter().position(|t| t.key == name) {
+                        self.tabs.remove(i);
+                        if self.active >= self.tabs.len() {
+                            self.active = self.tabs.len().saturating_sub(1);
+                        } else if i < self.active {
+                            self.active -= 1;
+                        }
+                    }
+                    self.ending.insert(name.clone());
+                    let host = self.host_of(&name);
+                    self.job(ctx, JobKind::EndSession(name.clone()), format!("Ending '{name}' on {host}…"), vec!["close".into(), name, "--yes".into()]);
+                }
                 Action::Reconnect(i) => {
                     if let Some(mut tab) = (i < self.tabs.len()).then(|| self.tabs.remove(i)) {
                         tab.term = None;
@@ -428,6 +466,11 @@ impl App {
             }
             if i.consume_key(cmd, Key::T) || i.consume_key(cmd, Key::N) {
                 self.actions.push(Action::NewSession(None));
+            }
+            if i.consume_key(cmd_shift, Key::W) {
+                if let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone()) {
+                    self.actions.push(Action::EndSession(k));
+                }
             }
             if i.consume_key(cmd, Key::W) {
                 self.actions.push(Action::Close(self.active));
@@ -571,7 +614,8 @@ impl App {
                 continue;
             }
             for s in &sessions {
-                let (status, status_color) = session_status(s);
+                let ending = self.ending.contains(&s.name);
+                let (status, status_color) = if ending { ("ending…".to_owned(), theme::FAINT) } else { session_status(s) };
                 let r = session_row(ui, RowLook {
                     icon: s.icon(),
                     icon_color: if s.running { theme::ACCENT } else { theme::FAINT },
@@ -579,8 +623,8 @@ impl App {
                     status: &status,
                     status_color,
                     active: active.as_deref() == Some(s.name.as_str()),
-                    dim: !s.running,
-                    busy: false,
+                    dim: !s.running || ending,
+                    busy: ending,
                 })
                 .on_hover_text(format!("{} · account {} · folder {}", s.engine, s.account, s.folder));
                 if r.clicked() {
@@ -597,6 +641,11 @@ impl App {
                     }
                     if ui.button("Send newest screenshot").clicked() {
                         self.actions.push(Action::PasteLast(s.name.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add_enabled(!ending, egui::Button::new(RichText::new("End session…").color(theme::RED))).clicked() {
+                        self.actions.push(Action::EndSession(s.name.clone()));
                         ui.close();
                     }
                 });
@@ -713,6 +762,17 @@ impl App {
                 self.actions.push(Action::Activate(i));
             }
             let _ = close_resp.on_hover_text("Close tab (the session keeps running)");
+            let key = tab.key.clone();
+            resp.context_menu(|ui| {
+                if ui.button("Close tab").clicked() {
+                    self.actions.push(Action::Close(i));
+                    ui.close();
+                }
+                if key != COORD && tab.pending.is_none() && ui.button(RichText::new("End session…").color(theme::RED)).clicked() {
+                    self.actions.push(Action::EndSession(key.clone()));
+                    ui.close();
+                }
+            });
             x += w;
         }
         let plus = Rect::from_min_size(pos2(x, rect.top()), vec2(34.0, rect.height()));
@@ -887,6 +947,9 @@ impl App {
             v.push(("Paste clipboard into this session".into(), "screenshot, image or copied files · ⌘V".into(), Action::PasteClipboard(k.clone())));
             v.push(("Send newest screenshot to this session".into(), "⌘⇧V".into(), Action::PasteLast(k.clone())));
             v.push(("Close tab".into(), "⌘W · the session keeps running".into(), Action::Close(self.active)));
+            if k != COORD {
+                v.push((format!("End session {k}…"), "⌘⇧W · stops it on its machine".into(), Action::EndSession(k.clone())));
+            }
         }
         if self.browser {
             v.push(("Browser: stop sharing".into(), "gwm chrome stop".into(), Action::Browser(false)));
@@ -979,6 +1042,46 @@ impl App {
         }
         if keep {
             self.palette = Some(pal);
+        }
+    }
+
+    // ---------- end session confirmation ----------
+    fn confirm_end_ui(&mut self, ctx: &egui::Context) {
+        let Some(name) = self.confirm_end.clone() else { return };
+        let host = self.host_of(&name);
+        let (mut keep, mut end) = (true, false);
+        let modal = egui::Modal::new(egui::Id::NULL.with("gwm-end-session"))
+            .frame(Frame::new().fill(theme::ELEVATED).stroke(Stroke::new(1.0, theme::BORDER)).corner_radius(CornerRadius::same(10)))
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                Frame::new().inner_margin(Margin::same(20)).show(ui, |ui| {
+                    ui.label(RichText::new(format!("End '{name}'?")).size(15.0).strong().color(theme::TEXT));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(format!(
+                        "It stops on {host} and leaves your saved sessions. Its screen is saved to the archive first, so you can bring it back with gwm resume."
+                    )).color(theme::MUTED));
+                    ui.add_space(16.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new(RichText::new("End session  ↵").color(theme::EDITOR)).fill(theme::RED).min_size(vec2(110.0, 28.0)).corner_radius(6)).clicked() {
+                            end = true;
+                        }
+                        if ui.add(egui::Button::new("Cancel").fill(theme::HOVER).min_size(vec2(72.0, 28.0)).corner_radius(6)).clicked() {
+                            keep = false;
+                        }
+                    });
+                });
+            });
+        if modal.should_close() {
+            keep = false; // Esc or a click outside
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+            end = true;
+        }
+        if end {
+            self.actions.push(Action::ConfirmEnd(name));
+            self.confirm_end = None;
+        } else if !keep {
+            self.confirm_end = None;
         }
     }
 
@@ -1168,7 +1271,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_messages(&ctx);
-        if self.palette.is_none() && self.dialog.is_none() {
+        if self.palette.is_none() && self.dialog.is_none() && self.confirm_end.is_none() {
             self.shortcuts(&ctx);
         }
         for a in &mut self.actions {
@@ -1179,7 +1282,7 @@ impl eframe::App for App {
             }
         }
         let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
-        let term_focus = self.palette.is_none() && self.dialog.is_none() && window_focused;
+        let term_focus = self.palette.is_none() && self.dialog.is_none() && self.confirm_end.is_none() && window_focused;
         if self.jobs.values().any(|j| j.done.is_none()) {
             ctx.request_repaint_after(Duration::from_millis(100)); // keep spinners moving
         }
@@ -1206,6 +1309,7 @@ impl eframe::App for App {
 
         self.palette_ui(&ctx);
         self.dialog_ui(&ctx);
+        self.confirm_end_ui(&ctx);
         self.run_actions(&ctx);
         self.maybe_screenshot(&ctx);
     }

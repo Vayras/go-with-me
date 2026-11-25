@@ -25,7 +25,7 @@ fn main() -> eframe::Result {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => screenshot = args.next().map(std::path::PathBuf::from),
-            "--show" => show = args.next(), // testing: open the palette or the new-session dialog
+            "--show" => show = args.next(), // testing: open the palette, the new-session dialog, or end:<session>
             "-h" | "--help" => {
                 println!("gwm-desktop [session…] — every machine and session from go-with-me (gwm) in one window");
                 return Ok(());
