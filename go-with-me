@@ -19,6 +19,8 @@
 #   gwm web token [--read-only]       new login token · gwm web tokens · gwm web revoke <name>|--all
 # Sessions
 #   gwm new [name] [--on machine] [--engine e] [--account a] [--folder f]   start a session (asks what's missing)
+#                                     --on can be any machine on your tailnet: if it's new, gwm sets it up first
+#   gwm tailnet                       every machine on your tailnet, and which ones go-with-me already knows
 #   gwm open <session>                open a tab for a session that isn't running/open yet (starts it)
 #   gwm close <session> [--yes]       stop a session and remove its tab (its screen + conversation are kept)
 #   gwm archive                       closed sessions you can bring back · gwm resume <session>
@@ -478,6 +480,7 @@ cmd_spawn() {  # gwm spawn <name> --on <machine> [--engine e] [--account a] [--f
     --prompt) prompt="$2"; shift 2;; *) n="$1"; shift;; esac; done
   [ -n "$n" ] && [ -n "$h" ] || die "usage: gwm spawn <name> --on <machine> [--engine claude] [--account a] [--folder f] [--prompt \"task\"]"
   [ "$e" = claude ] || a="-"
+  ensure_host "$h"; h="$ENSURED"
   sfield "$n" 1 >/dev/null 2>&1 || GWM_NO_TAB=1 cmd_new "$n" --on "$h" --engine "$e" --account "$a" --folder "$f" </dev/null >/dev/null || exit 1
   local program="$e"
   [ "$e" = shell ] && program="true"
@@ -516,16 +519,73 @@ cmd_open_session() {
   fi
   open_tab "$n" && echo "$(c 32)✓$(c 0) '$n' is open in the hub." || { echo "The hub isn't open — starting '$n' in this terminal instead."; cmd_attach "$n"; }
 }
+# ---------- your tailnet: start sessions on any machine on it ----------
+ts_peers() {  # "dns<TAB>name<TAB>os<TAB>online|offline<TAB>ip" for every other machine on your tailnet
+  [ -n "${GWM_DEMO:-}" ] && return 0
+  tailscale status --json 2>/dev/null | python3 -c '
+import sys, json, re
+d = json.load(sys.stdin)
+for p in (d.get("Peer") or {}).values():
+    dns = p.get("DNSName", "").rstrip(".")
+    if not dns: continue
+    name = re.sub(r"[^a-z0-9-]", "", (p.get("HostName") or dns.split(".")[0]).lower())[:24] or dns.split(".")[0]
+    print("\t".join([dns, name, p.get("OS") or "?", "online" if p.get("Online") else "offline", (p.get("TailscaleIPs") or [""])[0]]))' 2>/dev/null
+}
+peer_host() {  # peer_host <dns> <ip>: the go-with-me machine already saved for this tailnet peer, if any
+  hosts | awk -F'\t' -v d="$1" -v i="$2" '{a=$2; sub(/^.*@/,"",a); sub(/\.$/,"",a); if (tolower(a)==tolower(d) || a==i) {print $1; exit}}'
+}
+find_peer() {  # find_peer <query>: the tailnet peer a name means (full DNS name, its first part, host name, or IP)
+  local q; q="$(tr '[:upper:]' '[:lower:]' <<<"$1")"
+  ts_peers | awk -F'\t' -v q="$q" '{d=tolower($1); l=d; sub(/\..*/,"",l)} d==q || l==q || $2==q || $5==q {print; exit}'
+}
+ENSURED=""
+ensure_host() {  # ensure_host <machine | tailnet name> [user]: sets ENSURED to a saved machine — setting it up first if it's new
+  local q="$1" user="${2:-}" p dns name os on ip known
+  if hfield "$q" 1 >/dev/null 2>&1; then ENSURED="$q"; return 0; fi
+  p="$(find_peer "$q")"
+  [ -n "$p" ] || die "unknown machine '$q' — it's not in gwm hosts and not on your tailnet (see: gwm tailnet)"
+  IFS=$'\t' read -r dns name os on ip <<<"$p"
+  known="$(peer_host "$dns" "$ip")"
+  if [ -n "$known" ]; then ENSURED="$known"; echo "$(c 2)('$q' is your machine '$known')$(c 0)" >&2; return 0; fi
+  [ "$on" = online ] || die "'$q' ($dns) is on your tailnet but offline — wake it up and try again"
+  hfield "$name" 1 >/dev/null 2>&1 && name="$name-2"
+  echo "$(c 1)'$q' isn't set up for go-with-me yet$(c 0) — it's on your tailnet ($dns, $os). Setting it up (tmux, go-with-me, your config)…" >&2
+  [ -n "$user" ] || user="$(ask "Your username on $dns" "$(whoami)")"
+  ( cmd_add "$name" --address "$dns" --via tailscale --user "$user" --yes ) >&2 ||
+    die "couldn't set up $dns (see above). Fix that, or run: gwm add --via tailscale --address $dns"
+  hfield "$name" 1 >/dev/null 2>&1 || die "setting up $dns didn't finish"
+  ENSURED="$name"
+}
+cmd_tailnet() {  # gwm tailnet: every machine on your tailnet, and whether go-with-me knows it
+  ts_running || die "Tailscale isn't running on this Mac — run: gwm tailscale"
+  local dns name os on ip k
+  printf "$(c '1;38;5;214')%-40s %-8s %-8s %s$(c 0)\n" "TAILNET MACHINE" OS STATUS "GO-WITH-ME"
+  ts_peers | sort | while IFS=$'\t' read -r dns name os on ip; do
+    k="$(peer_host "$dns" "$ip")"
+    if [ -n "$k" ]; then printf "%-40s %-8s %-8s $(c 32)✓ %s$(c 0)\n" "$dns" "$os" "$on" "$k"
+    else printf "%-40s %-8s %-8s $(c 2)not set up → gwm new --on %s$(c 0)\n" "$dns" "$os" "$on" "${dns%%.*}"; fi
+  done
+}
+cmd_tailnet_data() {  # machine-readable, for apps: dns name os online ip saved-as
+  local dns name os on ip
+  ts_peers | while IFS=$'\t' read -r dns name os on ip; do printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$dns" "$name" "$os" "$on" "$ip" "$(peer_host "$dns" "$ip")"; done
+}
+
 ask() {  # ask "Question" default  → reply (or default when not interactive)
   local q="$1" d="$2" r; if [ -t 0 ]; then printf '%s%s: ' "$q" "${d:+ [$d]}" >&2; read -r r; fi; echo "${r:-$d}"; }
 cmd_new() {
-  local n="" h="" e="" a="" f=""
+  local n="" h="" e="" a="" f="" u=""
   while [ $# -gt 0 ]; do case "$1" in
-    --on) h="$2"; shift 2;; --engine) e="$2"; shift 2;; --account) a="$2"; shift 2;; --folder) f="$2"; shift 2;;
+    --on) h="$2"; shift 2;; --engine) e="$2"; shift 2;; --account) a="$2"; shift 2;; --folder) f="$2"; shift 2;; --user) u="$2"; shift 2;;
     *) n="$1"; shift;; esac; done
   echo "$(c 1)New session$(c 0) — a new tab running on one of your machines"
-  if [ -z "$h" ]; then echo "Machines: $(hosts | cut -f1 | paste -sd' ' - | sed 's/ /, /g')"; h="$(ask "Machine" "$(self_name)")"; fi
-  need_host "$h"
+  if [ -z "$h" ]; then
+    echo "Machines: $(hosts | cut -f1 | paste -sd' ' - | sed 's/ /, /g')"
+    local more; more="$(ts_peers | while IFS=$'\t' read -r dns _ _ on ip; do [ "$on" = online ] && [ -z "$(peer_host "$dns" "$ip")" ] && echo "${dns%%.*}"; done | paste -sd' ' - | sed 's/ /, /g')"
+    [ -n "$more" ] && echo "Also on your tailnet (set up automatically if you pick one): $more"
+    h="$(ask "Machine" "$(self_name)")"
+  fi
+  ensure_host "$h" "$u"; h="$ENSURED"
   [ -n "$e" ] || e="$(ask "Engine — claude, opencode, shell, or any coding CLI (kimi, codex, gemini…)" claude)"
   [[ "$e" =~ ^[A-Za-z0-9._-]+$ ]] || die "engine must be a program name like claude, opencode, kimi or shell"
   if [ "$e" != shell ] && ! has_cmd "$h" "$e"; then
@@ -1358,6 +1418,7 @@ case "${1:-open}" in
   peek)    [ $# -ge 2 ] || die "usage: gwm peek <session> [lines]"; cmd_peek "$2" "${3:-40}" ;;
   send)    [ $# -ge 3 ] || die "usage: gwm send <session> <text>"; shift; cmd_send "$@" ;;
   paste)   shift; cmd_paste "$@" ;;
+  tailnet) cmd_tailnet ;;  _tailnet) cmd_tailnet_data ;;
   share)   shift; cmd_share "$@" ;;
   chrome)  shift; cmd_chrome "$@" ;;
   _chrome-tunnel) need_host "$2"; cmd_chrome_tunnel "$2" ;;

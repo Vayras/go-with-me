@@ -59,6 +59,7 @@ gwm             # open the hub
 |---|---|
 | Open the hub (only running sessions get a tab; nothing new is started) | `gwm` |
 | Start a new session (asks machine / engine / account / folder) | `gwm new` |
+| Start a session on **any machine on your tailnet** (new ones are set up for you: tmux, go-with-me, your config) | `gwm new --on <tailnet-name>` · `gwm tailnet` lists them |
 | Open a tab for a session that isn't running | `gwm open <session>` |
 | Close a session and its tab (its screen is saved to `~/.config/go-with-me/archive/` first; Claude chats are kept) | `gwm close <session>` |
 | Stop it but keep the tab (Enter in the tab restarts it) | `gwm stop <session>` |
