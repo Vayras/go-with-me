@@ -112,6 +112,25 @@ Chrome listens on `127.0.0.1:9339` only, and each other machine reaches it throu
 that browser while it's shared, so it uses its own profile: sign in there only to what agents should use. Sharing
 ends when you quit that window or run `gwm chrome stop`. Lima VMs aren't supported yet.
 
+## gwm-desktop (native Mac app)
+
+`gwm-desktop/` is a native macOS app in Rust (egui + alacritty's terminal engine) with a Zed-style layout:
+your machines in a sidebar, each with its sessions grouped under it (live state: working / idle / not started),
+sessions as tabs, a command palette (**⌘K**), and a status bar. It runs the same `gwm` underneath. Each tab is
+`gwm attach <session>`, so sessions keep running on their machines when you close a tab or quit.
+
+- **New session anywhere:** ⌘T, "+ new session" in a machine's group, or a machine under *On your tailnet*.
+  Machines that aren't set up yet are set up for you (tmux, go-with-me, your config). The session shows up
+  right away and turns into a terminal when it's ready.
+- **Screenshots and files:** ⌘V pastes a screenshot or files copied in Finder into the session (any machine),
+  ⌘⇧V sends your newest screenshot, and you can drop files on a tab.
+- **Browser:** the title-bar toggle shares a Chrome window with every machine (`gwm chrome`).
+- Keys: ⌘1…9 tabs · ⌘W close tab · ⌘B sidebar · ⌘= / ⌘- text size · ⇧↵ newline in Claude · ⌥ works as Meta.
+
+```bash
+cd gwm-desktop && ./bundle.sh --install   # builds gwm-desktop.app into ~/Applications (needs Rust: rustup.rs)
+```
+
 ## Web access
 
 ```bash
