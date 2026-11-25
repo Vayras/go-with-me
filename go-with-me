@@ -161,9 +161,11 @@ else
   used=$(awk "/MemTotal/{t=\$2} /MemAvailable/{a=\$2} END{printf \"%.0f\", (t-a)/1048576}" /proc/meminfo)
 fi
 # loaded local models from oMLX (:8000) and Ollama (:11434), whichever run here: M|name|GB|format lines
-ml=$(python3 -c "import json, urllib.request as u
+ml=$(python3 -c "import json, os, urllib.request as u
+kf = os.path.expanduser(\"~/.omlx/api_key\")
+key = open(kf).read().strip() if os.path.exists(kf) else \"\"
 def get(url):
-    try: return json.load(u.urlopen(url, timeout=1))
+    try: return json.load(u.urlopen(u.Request(url, headers={\"Authorization\": \"Bearer \" + key} if key else {}), timeout=1))
     except Exception: return {}
 for m in get(\"http://127.0.0.1:8000/v1/models/status\").get(\"models\", []):
     if m.get(\"loaded\"): print(\"M|%s|%.1f|omlx\" % (m[\"id\"], (m.get(\"actual_size\") or m.get(\"estimated_size\") or 0) / 1e9))
@@ -781,8 +783,9 @@ cmd_vm() {
 }
 
 # ---------- local models ----------
-cmd_models() { parse_on "$@"; run_script "$ON" 'if curl -sf -m 2 http://127.0.0.1:8000/v1/models/status >/dev/null; then
-  echo "oMLX (http://127.0.0.1:8000, dashboard /admin)"; curl -sf http://127.0.0.1:8000/v1/models/status | python3 -c "import json, sys
+cmd_models() { parse_on "$@"; run_script "$ON" 'k=$(cat ~/.omlx/api_key 2>/dev/null); A=(); [ -n "$k" ] && A=(-H "Authorization: Bearer $k")
+if curl -sf -m 2 ${A[@]+"${A[@]}"} http://127.0.0.1:8000/v1/models/status >/dev/null; then
+  echo "oMLX (http://127.0.0.1:8000, dashboard /admin)"; curl -sf ${A[@]+"${A[@]}"} http://127.0.0.1:8000/v1/models/status | python3 -c "import json, sys
 for m in json.load(sys.stdin).get(\"models\", []):
     gb = (m.get(\"actual_size\") or m.get(\"estimated_size\") or 0) / 1e9
     print(\"  %-28s %5.1f GB  %s\" % (m[\"id\"], gb, \"loaded\" if m.get(\"loaded\") else \"\"))"
@@ -799,8 +802,8 @@ cmd_opencode_setup() {
   while [ $i -lt ${#ARGS[@]} ]; do [ "${ARGS[$i]}" = --model ] && model="${ARGS[$((i+1))]}"; i=$((i+1)); done
   run_script "$ON" "
 f=\$HOME/.config/opencode/opencode.json; mkdir -p \$(dirname \$f); [ -f \$f ] && cp \$f \$f.bak
-t=\$(mktemp); srv=ollama
-if curl -sf -m 2 http://127.0.0.1:8000/v1/models > \$t.json; then srv=omlx
+t=\$(mktemp); srv=ollama; k=\$(cat ~/.omlx/api_key 2>/dev/null); A=(); [ -n \"\$k\" ] && A=(-H \"Authorization: Bearer \$k\")
+if curl -sf -m 2 \${A[@]+\"\${A[@]}\"} http://127.0.0.1:8000/v1/models > \$t.json; then srv=omlx
   python3 -c 'import json, sys; [print(m[\"id\"]) for m in json.load(open(sys.argv[1]))[\"data\"]]' \$t.json > \$t
 else ollama list 2>/dev/null | awk 'NR>1{print \$1}' > \$t; fi
 rm -f \$t.json
@@ -817,6 +820,8 @@ prov.pop('ollama' if srv == 'omlx' else 'omlx', None)
 prov[srv] = {'npm': '@ai-sdk/openai-compatible', 'name': 'oMLX (local)' if srv == 'omlx' else 'Ollama (local)',
              'options': {'baseURL': 'http://127.0.0.1:8000/v1' if srv == 'omlx' else 'http://127.0.0.1:11434/v1'},
              'models': {m: {'name': m} for m in models}}
+if srv == 'omlx' and os.path.exists(os.path.expanduser('~/.omlx/api_key')):
+    prov[srv]['options']['apiKey'] = '{file:~/.omlx/api_key}'   # opencode reads the key file; the key is never copied
 pick = want or next((m for m in models if 'inkling' in m), models[0] if models else '')
 if pick: cfg['model'] = srv + '/' + pick
 json.dump(cfg, open(path, 'w'), indent=2)
