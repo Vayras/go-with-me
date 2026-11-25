@@ -104,7 +104,7 @@ Pick a number, or type an address [1]:
 ✓ Alexs-MacBook-Pro.local is reachable (Remote Login)
 Your username on that Mac [alex]: alexk
 ✓ Logged in as alexk
-✓ Alexs-MacBook-Pro · 26.6.2 · 24GB · tmux ✓ claude ✓ opencode ✗ ollama ✓
+✓ Alexs-MacBook-Pro · 26.6.2 · 24GB · tmux ✓ claude ✓ opencode ✗ omlx ✓ ollama ✗
 Short name for it [macbook]:
 ✓ Saved as 'macbook' → alexk@Alexs-MacBook-Pro.local
 ✓ 'macbook' can reach this Mac too
@@ -146,13 +146,18 @@ gwm new work-api --on studio --engine claude --account work --folder ~/work
 gwm login work --on studio          # or just sign in inside the new tab
 ```
 
-**Local models (no cloud tokens).** Use Ollama and opencode on your strongest Mac:
+**Local models (no cloud tokens).** Use [oMLX](https://github.com/jundot/omlx) (Mac-native MLX, recommended on Apple
+Silicon) and opencode on your strongest Mac:
 ```bash
-gwm run studio "brew install ollama opencode && brew services start ollama"
-gwm pull qwen3.8-27b --on studio
+gwm run studio "brew tap jundot/omlx https://github.com/jundot/omlx && brew install jundot/omlx/omlx opencode && omlx start"
+gwm pull mlx-community/Qwen3.8-27B-8bit --on studio    # a Hugging Face MLX repo -> ~/.omlx/models
 gwm opencode-setup --on studio
 gwm new local --on studio --engine opencode
 ```
+Qwen3.5/3.6 models run much faster with oMLX's native kernels: install with `--with-custom-kernel` (needs full
+Xcode and `xcodebuild -downloadComponent MetalToolchain`). oMLX's dashboard is at `http://127.0.0.1:8000/admin` on that
+Mac. Ollama still works: `brew install ollama && brew services start ollama`, then `gwm pull <ollama model>`; the
+sidebar, `gwm models` and `gwm opencode-setup` use whichever is running (oMLX first).
 
 **Linux VMs (sandboxes)** on your strongest Mac, via Lima:
 ```bash

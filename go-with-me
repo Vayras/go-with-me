@@ -45,10 +45,10 @@
 # VMs (Linux, via Lima — run them on your strongest machine)
 #   gwm vm create <name> [--on host] [--cpus N] [--memory GB] [--disk GB]
 #   gwm vm list|start|stop|delete [name] [--on host]
-# Local models (Ollama) + opencode
-#   gwm models [--on host]            installed + loaded models
-#   gwm pull <model> [--on host]      download a model
-#   gwm opencode-setup [--on host] [--model name]   point opencode at that host's Ollama
+# Local models (oMLX or Ollama) + opencode
+#   gwm models [--on host]            installed + loaded models (oMLX when it runs there, else Ollama)
+#   gwm pull <model> [--on host]      download a model (org/name = Hugging Face MLX repo into oMLX; else Ollama)
+#   gwm opencode-setup [--on host] [--model name]   point opencode at that host's oMLX (or Ollama)
 # Setup
 #   gwm init [name]                   one-time on each machine: name it and create its config
 #   gwm tailscale                     set up Tailscale + Tailscale SSH on this Mac (then no Remote Login needed)
@@ -160,12 +160,19 @@ else
   tot=$(awk "/MemTotal/{printf \"%.0f\", \$2/1048576}" /proc/meminfo)
   used=$(awk "/MemTotal/{t=\$2} /MemAvailable/{a=\$2} END{printf \"%.0f\", (t-a)/1048576}" /proc/meminfo)
 fi
-models=$(curl -s -m 1 http://127.0.0.1:11434/api/ps 2>/dev/null | grep -o "\"name\":\"[^\"]*\"" | cut -d\" -f4 | sort -u | paste -sd, -)
+# loaded local models from oMLX (:8000) and Ollama (:11434), whichever run here: M|name|GB|format lines
+ml=$(python3 -c "import json, urllib.request as u
+def get(url):
+    try: return json.load(u.urlopen(url, timeout=1))
+    except Exception: return {}
+for m in get(\"http://127.0.0.1:8000/v1/models/status\").get(\"models\", []):
+    if m.get(\"loaded\"): print(\"M|%s|%.1f|omlx\" % (m[\"id\"], (m.get(\"actual_size\") or m.get(\"estimated_size\") or 0) / 1e9))
+for m in get(\"http://127.0.0.1:11434/api/ps\").get(\"models\", []): print(\"M|%s|%.1f|%s\" % (m[\"name\"], (m.get(\"size_vram\") or m.get(\"size\", 0)) / 1e9, (m.get(\"details\") or {}).get(\"format\", \"\")))" 2>/dev/null)
+models=$(printf "%s\n" "$ml" | awk -F"|" "NF>1{print \$2}" | sort -u | paste -sd, -)
 vms=$(command -v limactl >/dev/null && limactl list --format "{{.Name}}:{{.Status}}" 2>/dev/null | paste -sd, -)
 gpu=$(ioreg -r -d 1 -w 0 -c IOAccelerator 2>/dev/null | grep -o "\"Device Utilization %\"=[0-9]*" | head -1 | cut -d= -f2)
 echo "H|$cpu|$used/${tot}G|${models:--}|${vms:-}|${gpu:+$gpu%}"
-curl -s -m 1 http://127.0.0.1:11434/api/ps 2>/dev/null | python3 -c "import sys, json
-for m in json.load(sys.stdin).get(\"models\", []): print(\"M|%s|%.1f|%s\" % (m[\"name\"], (m.get(\"size_vram\") or m.get(\"size\", 0)) / 1e9, (m.get(\"details\") or {}).get(\"format\", \"\")))" 2>/dev/null
+[ -n "$ml" ] && printf "%s\n" "$ml"
 if command -v tmux >/dev/null; then
   now=$(date +%s)
   tmux list-sessions -F "#{session_name}|#{session_activity}|#{session_attached}|#{pane_title}" 2>/dev/null | grep "^gwm-" |
@@ -707,7 +714,7 @@ cmd_run() { local h="$1"; shift; need_host "$h"; run_script "$h" "cd ~ && eval \
 cmd_doctor() {
   while IFS=$'\t' read -r h t role; do
     printf "$(c 1)%s$(c 0)  %s\n" "$h" "$(is_local "$h" && echo "(this machine)" || echo "$t")"
-    out="$(run_script "$h" 'echo reach-ok; for x in tmux claude opencode ollama limactl; do command -v $x >/dev/null && echo "$x-ok"; done; [ "$(uname)" = Darwin ] && pmset -g | awk "/ sleep /{print \"sleep=\"\$2}"' 2>&1)"
+    out="$(run_script "$h" 'echo reach-ok; for x in tmux claude opencode omlx ollama limactl; do command -v $x >/dev/null && echo "$x-ok"; done; [ "$(uname)" = Darwin ] && pmset -g | awk "/ sleep /{print \"sleep=\"\$2}"' 2>&1)"
     if ! grep -q reach-ok <<<"$out"; then
       echo "  $(c 31)✗ unreachable:$(c 0) $(tail -1 <<<"$out")"
       case "$t" in vm:*) echo "    → start it: gwm vm start ${t#*/} --on ${t#vm:}" | sed 's#/[^ ]*$##';;
@@ -715,7 +722,7 @@ cmd_doctor() {
            echo "    → then on $h:  ssh $(hfield "$(self_name)" 2 2>/dev/null) cat .ssh/id_ed25519.pub >> ~/.ssh/authorized_keys";; esac
       continue
     fi
-    for x in tmux claude opencode ollama limactl; do
+    for x in tmux claude opencode omlx ollama limactl; do
       grep -q "^$x-ok" <<<"$out" && printf "  $(c 32)✓$(c 0) %s" "$x" || printf "  $(c 2)· %s$(c 0)" "$x"; done; echo
     s="$(grep sleep= <<<"$out" | cut -d= -f2)"
     [ -n "$s" ] && { [ "$s" = 0 ] && echo "  $(c 32)✓$(c 0) never sleeps" || echo "  $(c 33)•$(c 0) sleeps after $s min (servers: sudo pmset -a sleep 0)"; }
@@ -774,30 +781,46 @@ cmd_vm() {
 }
 
 # ---------- local models ----------
-cmd_models() { parse_on "$@"; run_script "$ON" 'command -v ollama >/dev/null || { echo "Ollama not installed (brew install ollama && brew services start ollama)"; exit; }
-echo "INSTALLED"; ollama list; echo; echo "LOADED IN MEMORY"; ollama ps'; }
-cmd_pull() { parse_on "$@"; [ -n "${ARGS[0]:-}" ] || die "usage: gwm pull <model> [--on host]"; run_tty "$ON" "ollama pull ${ARGS[0]}"; }
+cmd_models() { parse_on "$@"; run_script "$ON" 'if curl -sf -m 2 http://127.0.0.1:8000/v1/models/status >/dev/null; then
+  echo "oMLX (http://127.0.0.1:8000, dashboard /admin)"; curl -sf http://127.0.0.1:8000/v1/models/status | python3 -c "import json, sys
+for m in json.load(sys.stdin).get(\"models\", []):
+    gb = (m.get(\"actual_size\") or m.get(\"estimated_size\") or 0) / 1e9
+    print(\"  %-28s %5.1f GB  %s\" % (m[\"id\"], gb, \"loaded\" if m.get(\"loaded\") else \"\"))"
+elif command -v ollama >/dev/null; then echo "INSTALLED"; ollama list; echo; echo "LOADED IN MEMORY"; ollama ps
+else echo "no local model server (oMLX: brew tap jundot/omlx https://github.com/jundot/omlx && brew install jundot/omlx/omlx && omlx start)"; fi'; }
+cmd_pull() { parse_on "$@"; local m="${ARGS[0]:-}"; [ -n "$m" ] || die "usage: gwm pull <model> [--on host]"
+  case "$m" in
+    */*) run_tty "$ON" "py=/opt/homebrew/opt/omlx/libexec/bin/python; [ -x \$py ] || { echo 'oMLX not installed'; exit 1; }
+\$py -c 'import sys, os; from huggingface_hub import snapshot_download; print(snapshot_download(sys.argv[1], local_dir=os.path.expanduser(\"~/.omlx/models/\") + sys.argv[1].split(\"/\")[-1]))' '$m'" ;;
+    *) run_tty "$ON" "ollama pull $m" ;;
+  esac; }
 cmd_opencode_setup() {
   parse_on "$@"; local model="" i=0
   while [ $i -lt ${#ARGS[@]} ]; do [ "${ARGS[$i]}" = --model ] && model="${ARGS[$((i+1))]}"; i=$((i+1)); done
   run_script "$ON" "
 f=\$HOME/.config/opencode/opencode.json; mkdir -p \$(dirname \$f); [ -f \$f ] && cp \$f \$f.bak
-t=\$(mktemp); ollama list 2>/dev/null | awk 'NR>1{print \$1}' > \$t
-python3 - \"\$f\" '$model' \"\$t\" <<'PY'
+t=\$(mktemp); srv=ollama
+if curl -sf -m 2 http://127.0.0.1:8000/v1/models > \$t.json; then srv=omlx
+  python3 -c 'import json, sys; [print(m[\"id\"]) for m in json.load(open(sys.argv[1]))[\"data\"]]' \$t.json > \$t
+else ollama list 2>/dev/null | awk 'NR>1{print \$1}' > \$t; fi
+rm -f \$t.json
+python3 - \"\$f\" '$model' \"\$t\" \"\$srv\" <<'PY'
 import json, sys, os
 path, want = sys.argv[1], sys.argv[2]
 cfg = json.load(open(path)) if os.path.exists(path) else {}
 models = [m.strip() for m in open(sys.argv[3]) if m.strip()]
 cfg.setdefault('\$schema', 'https://opencode.ai/config.json')
 prov = cfg.setdefault('provider', {})
+srv = sys.argv[4]
 prov.pop('lmstudio', None)
-prov['ollama'] = {'npm': '@ai-sdk/openai-compatible', 'name': 'Ollama (local)',
-                  'options': {'baseURL': 'http://127.0.0.1:11434/v1'},
-                  'models': {m: {'name': m} for m in models}}
+prov.pop('ollama' if srv == 'omlx' else 'omlx', None)
+prov[srv] = {'npm': '@ai-sdk/openai-compatible', 'name': 'oMLX (local)' if srv == 'omlx' else 'Ollama (local)',
+             'options': {'baseURL': 'http://127.0.0.1:8000/v1' if srv == 'omlx' else 'http://127.0.0.1:11434/v1'},
+             'models': {m: {'name': m} for m in models}}
 pick = want or next((m for m in models if 'inkling' in m), models[0] if models else '')
-if pick: cfg['model'] = 'ollama/' + pick
+if pick: cfg['model'] = srv + '/' + pick
 json.dump(cfg, open(path, 'w'), indent=2)
-print('opencode → Ollama with', len(models), 'models; default:', pick or '(none installed yet)')
+print('opencode →', prov[srv]['name'], 'with', len(models), 'models; default:', pick or '(none installed yet)')
 PY
 rm -f \$t"
 }
@@ -1316,12 +1339,12 @@ cmd_add() {
   # 5. what is it?
   local info; info="$(run_script_target "$t" 'echo "host=$(scutil --get LocalHostName 2>/dev/null || hostname -s)"; echo "os=$(sw_vers -productVersion 2>/dev/null || uname -sr)"
     echo "ram=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"; echo "model=$(sysctl -n hw.model 2>/dev/null || uname -m)"
-    for x in brew tmux zellij claude opencode ollama limactl tailscale; do command -v $x >/dev/null && echo "has=$x"; done')"
+    for x in brew tmux zellij claude opencode omlx ollama limactl tailscale; do command -v $x >/dev/null && echo "has=$x"; done')"
   local rhost ros rram rmodel; rhost="$(sed -n 's/^host=//p' <<<"$info")"; ros="$(sed -n 's/^os=//p' <<<"$info")"
   rram="$(sed -n 's/^ram=//p' <<<"$info")"; rmodel="$(sed -n 's/^model=//p' <<<"$info")"
   has() { grep -qx "has=$1" <<<"$info"; }
   printf "$(c 32)✓$(c 0) %s · %s · %sGB · " "$rhost" "$ros" "$rram"
-  for x in tmux claude opencode ollama; do has $x && printf "%s ✓ " "$x" || printf "$(c 2)%s ✗$(c 0) " "$x"; done; echo
+  for x in tmux claude opencode omlx ollama; do has $x && printf "%s ✓ " "$x" || printf "$(c 2)%s ✗$(c 0) " "$x"; done; echo
   if ! has tmux; then
     if has brew && { [ -n "$yes" ] || [ "$(ask "tmux is needed to keep sessions running there. Install it now? (y/n)" y)" = y ]; }; then
       run_script_target "$t" 'brew install tmux >/dev/null 2>&1 && echo ok' | grep -q ok && echo "$(c 32)✓$(c 0) installed tmux" || echo "$(c 33)•$(c 0) couldn't install tmux — run 'brew install tmux' there"

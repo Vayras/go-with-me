@@ -31,7 +31,7 @@ A **session** is *machine + engine + account + folder*:
 | | |
 |---|---|
 | **Machines** | Any Mac (or Linux box), connected over [Tailscale](https://tailscale.com) (works anywhere, no Remote Login) or plain SSH with Remote Login |
-| **Terminals, not auto-launched apps** | Every tab is a plain terminal; **nothing starts on its own**. A session's engine (`claude`, `opencode` with local [Ollama](https://ollama.com) models, or `shell`) just labels what it's for and shows a hint; you type `claude` / `opencode` when you want it |
+| **Terminals, not auto-launched apps** | Every tab is a plain terminal; **nothing starts on its own**. A session's engine (`claude`, `opencode` with local models on [oMLX](https://github.com/jundot/omlx) or [Ollama](https://ollama.com), or `shell`) just labels what it's for and shows a hint; you type `claude` / `opencode` when you want it |
 | **Accounts** | Several Claude logins side by side: in a `work` tab, typing `claude` uses your work login, and in a `personal` tab your personal one |
 | **Web** | The same hub in a browser on any of your Tailscale devices (`gwm web`): same sidebar, same terminals, same keys. Tailnet-only HTTPS plus a login token |
 | **VMs** | `gwm vm create sandbox --on studio` makes a Linux VM ([Lima](https://lima-vm.io)) on your strongest machine; it shows up as a machine with its own sessions |
@@ -171,7 +171,7 @@ Plain bash, no daemon or server:
 
 - **Zellij** draws the hub on the machine you're sitting at: a Python **sidebar** (curses) beside each session's terminal.
 - Each session lives in a **hidden tmux** on its own machine (no status bar, no prefix key; it's only there so sessions survive disconnects). Tabs reconnect to it over **SSH**.
-- The sidebar's data comes from one shared SSH sweep of every machine (cached a few seconds): CPU/RAM, Ollama's loaded models, Lima VMs, tmux sessions, and incoming SSH/Tailscale connections (that's **in use**).
+- The sidebar's data comes from one shared SSH sweep of every machine (cached a few seconds): CPU/RAM, loaded local models (oMLX and/or Ollama), Lima VMs, tmux sessions, and incoming SSH/Tailscale connections (that's **in use**).
 - **Accounts** = a separate `CLAUDE_CONFIG_DIR` per label on each machine.
 - The **coordinator** tab is a terminal in `coordinator/`; when you run `claude` there it reads `CLAUDE.md` and uses `gwm status / peek / send / run`. It asks before sending to a session or changing anything.
 
