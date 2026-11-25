@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(gwm run:*)",
+      "Bash(gwm send:*)",
+      "Bash(gwm close:*)",
+      "Bash(gwm stop:*)",
+      "Bash(gwm new:*)",
+      "Bash(gwm vm:*)",
+      "Bash(gwm add:*)",
+      "Bash(gwm remove:*)",
+      "Bash(gwm sync:*)",
+      "Bash(gwm web:*)",
+      "Bash(go-with-me run:*)",
+      "Bash(go-with-me send:*)",
+      "Bash(ssh:*)",
+      "Bash(gwm spawn:*)",
+      "Bash(gwm resume:*)"
+    ]
+  }
+}

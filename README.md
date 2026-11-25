@@ -33,6 +33,7 @@ A **session** is *machine + engine + account + folder*:
 | **Machines** | Any Mac (or Linux box), connected over [Tailscale](https://tailscale.com) (works anywhere, no Remote Login) or plain SSH with Remote Login |
 | **Terminals, not auto-launched apps** | Every tab is a plain terminal; **nothing starts on its own**. A session's engine (`claude`, `opencode` with local [Ollama](https://ollama.com) models, or `shell`) just labels what it's for and shows a hint; you type `claude` / `opencode` when you want it |
 | **Accounts** | Several Claude logins side by side: in a `work` tab, typing `claude` uses your work login, and in a `personal` tab your personal one |
+| **Web** | The same hub in a browser on any of your Tailscale devices (`gwm web`): same sidebar, same terminals, same keys. Tailnet-only HTTPS plus a login token |
 | **VMs** | `gwm vm create sandbox --on studio` makes a Linux VM ([Lima](https://lima-vm.io)) on your strongest machine; it shows up as a machine with its own sessions |
 
 <img src="docs/status.png" alt="gwm status" width="100%">
@@ -59,10 +60,13 @@ gwm             # open the hub
 | Open the hub (only running sessions get a tab; nothing new is started) | `gwm` |
 | Start a new session (asks machine / engine / account / folder) | `gwm new` |
 | Open a tab for a session that isn't running | `gwm open <session>` |
-| Close a session and its tab | `gwm close <session>` |
+| Close a session and its tab (its screen is saved to `~/.config/go-with-me/archive/` first; Claude chats are kept) | `gwm close <session>` |
 | Stop it but keep the tab (Enter in the tab restarts it) | `gwm stop <session>` |
+| Start a session **with its agent running** (optionally a first task) | `gwm spawn fix-tests --on macbook --prompt "run the tests and fix failures"` |
+| See closed sessions · bring one back with its Claude conversation | `gwm archive` · `gwm resume <session>` |
 | See everything at a glance / who's using what | `gwm status` · `gwm who` |
 | Read or type into a session from anywhere | `gwm peek <session>` · `gwm send <session> "text"` |
+| Read a session's whole Claude conversation (the coordinator does this for every chat by default) | `gwm history <session>` · `gwm history --all` |
 | Add / remove a machine | `gwm add [--via tailscale\|ssh]` · `gwm remove <machine>` |
 | Set up Tailscale on this Mac | `gwm tailscale` |
 | Run a command on a machine | `gwm run <machine> "git status"` |
@@ -70,9 +74,58 @@ gwm             # open the hub
 | Linux VMs | `gwm vm create <name> --on <machine> [--cpus 6 --memory 16]` · `gwm vm list` |
 | Local models | `gwm models --on studio` · `gwm pull <model>` · `gwm opencode-setup --on studio` |
 | Copy text | Select it with the mouse; it's copied automatically. Paste with Cmd+V |
-| Leave the hub (everything keeps running) | **Ctrl+g → o → d**, or close the window |
+| Paste a screenshot (or files copied in Finder) into a session on **another machine** | **⌥V** in its tab · `gwm paste [session]` · `gwm paste --last` (newest screenshot file) |
+| Send files to a session's machine, from here or from another session | `gwm share report.pdf studio-work` · `gwm share studio:out/chart.png macbook-claude` |
+| Give every machine's Claude a browser (a Chrome window on this Mac) | `gwm chrome` · `gwm chrome status` · `gwm chrome stop` |
+| Open the hub in a browser (your tailnet only) | `gwm web` · `gwm web stop` · `gwm web token` |
+| Leave the hub (everything keeps running) | **⌥Q**, or close the window |
 
-**In the hub:** the **sidebar** (left) lists every machine and session: click to jump, **n** new, **x** close, **?** help. Click tabs and panes with the mouse; select text to copy. Keys go straight to Claude or opencode until you press **Ctrl+g**; the bottom bar then shows what each key does. **Alt+1…9** and **Alt+←/→** switch tabs at any time (Terminal.app: enable *Use Option as Meta key*).
+**Shortcuts** (⌥ = Option; in Terminal.app run `gwm keys --setup` once so ⌥ works):
+
+| | |
+|---|---|
+| **⌥1…9** · **⌥← ⌥→** | jump to a tab · previous / next |
+| **⌥S** | switch between sidebar and terminal |
+| **⌥N** · **⌥X** · **⌥Z** | new pane · close pane · zoom pane |
+| **⌥O** | open or create a session |
+| **⌥V** | paste a screenshot / copied files into this tab's session (any machine) |
+| **⌥Q** | leave (everything keeps running) |
+| **⌥/** | show all shortcuts (`gwm keys`) |
+
+Click anything in the sidebar too. Select text to copy it.
+
+## Screenshots, files and a browser for remote sessions
+
+Claude Code reads the clipboard of the machine **it runs on**, so ⌃V-ing a screenshot into a session on the Studio
+gets nothing. Instead, press **⌥V** in that tab (or run `gwm paste`). It copies the image to that machine's inbox
+(`~/.cache/go-with-me/inbox/`, cleared after 7 days) and types its path into the prompt, where Claude Code attaches
+it as an image. Then press Enter. With no image on the clipboard, it offers your newest screenshot file. Files copied
+in Finder (⌘C) work too. `gwm share` does the same for any file or folder, including ones on another machine
+(`session:path` or `machine:path`). Add `--no-type` to copy without typing anything into the session.
+
+`gwm chrome` opens a separate Chrome window on the Mac you're at and lets Claude on every machine drive it, through
+[chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) (added to Claude Code on each machine as
+`gwm-chrome`, for each account its sessions use; restart `claude` in sessions that were already running).
+Chrome listens on `127.0.0.1:9339` only, and each other machine reaches it through an SSH reverse tunnel bound to
+*its* `127.0.0.1`, so nothing is exposed on the network. Anything running on those machines as any user can drive
+that browser while it's shared, so it uses its own profile: sign in there only to what agents should use. Sharing
+ends when you quit that window or run `gwm chrome stop`. Lima VMs aren't supported yet.
+
+## Web access
+
+```bash
+gwm web            # prints https://<this-mac>.<tailnet>.ts.net:8443/gwm and, the first time, a login token
+gwm web stop       # stop sharing (your hub and sessions keep running)
+```
+
+It's the same hub (sidebar + terminals) through [Zellij's web client](https://zellij.dev), with four layers of protection:
+
+1. **Local only.** The web server listens on `127.0.0.1`, so nothing on your Wi-Fi or the internet can connect to it. `gwm web` refuses to continue if it's ever bound wider.
+2. **Your tailnet only.** [Tailscale Serve](https://tailscale.com/kb/1312/serve) publishes it over HTTPS with a real `*.ts.net` certificate to the devices your tailnet's access rules allow to reach this Mac (just yours, in a personal tailnet; check your rules if you share nodes or have teammates). It's Serve, not Funnel, so it's never on the public internet. `gwm web stop` always removes the route; it would otherwise survive reboots.
+3. **Login token.** Every browser logs in with a token (`gwm web token`). Use `--read-only` for watch-only access, and `gwm web revoke <name>` revokes one; revoking also logs out browsers already using it.
+4. **Only the hub is shared.** Web sharing is enabled for the go-with-me hub, not for your other terminal sessions.
+
+A token is a terminal on that Mac, so treat it like a password. One-time setup: turn on **HTTPS Certificates** in your [Tailscale DNS settings](https://login.tailscale.com/admin/dns).
 
 ## Config
 
@@ -119,6 +172,7 @@ The pieces of go-with-me exist elsewhere; the combination is what's different. W
 
 ## Security notes
 
+- **The coordinator reads every Claude chat** on every machine and account (including work accounts) by default, and it can run commands everywhere. Text it reads could try to steer it (prompt injection), so `coordinator/.claude/settings.json` makes Claude **always ask you** before `gwm run`, `gwm send`, `ssh`, or anything that creates, closes or deletes. Keep it that way, and avoid auto mode in the coordinator.
 - `gwm send` / `gwm run` execute on your machines over SSH. Treat the coordinator like any agent with shell access.
 - Lima VMs mount your home folder **read-only** by default, which makes them good sandboxes.
 - Check your employer's policy before joining work machines or work accounts.

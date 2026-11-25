@@ -5,6 +5,8 @@
 //   Ctrl+g  t  then n = new tab · x = close tab · ←/→ = switch tab
 //   Ctrl+g  o  then d = leave the hub (everything keeps running)
 // Mouse: click a tab to switch, click a pane to focus it, scroll to scroll.
+// Shortcuts: one key combo each, no modes. ⌥ = Option (Terminal.app: run `gwm keys --setup` once).
+// Picked to avoid Claude Code's own (⌥P, ⌥T, ⌥Enter). `gwm keys` or ⌥/ shows this list.
 keybinds preset="unlock-first" {
     locked {
         bind "Alt 1" { GoToTab 1; }
@@ -18,6 +20,14 @@ keybinds preset="unlock-first" {
         bind "Alt 9" { GoToTab 9; }
         bind "Alt Left" { GoToPreviousTab; }
         bind "Alt Right" { GoToNextTab; }
+        bind "Alt s" { FocusNextPane; }                       // sidebar <-> terminal
+        bind "Alt n" { NewPane "Right"; }                     // split: new terminal pane
+        bind "Alt x" { CloseFocus; }                          // close the focused pane
+        bind "Alt z" { ToggleFocusFullscreen; }               // zoom the focused pane
+        bind "Alt o" { Run "bash" "-c" "gwm pick || { echo; read -rp 'Press Enter to close '; }" { floating true; close_on_exit true; name "open a session"; }; }
+        bind "Alt v" { Run "bash" "-c" "gwm paste || { echo; read -rp 'Press Enter to close '; }" { floating true; close_on_exit true; name "paste into this session"; }; }
+        bind "Alt q" { Detach; }                              // leave; everything keeps running
+        bind "Alt /" { Run "gwm" "keys" { floating true; close_on_exit true; name "shortcuts"; }; }
     }
 }
 
@@ -32,3 +42,17 @@ show_release_notes false
 // Copying: select text with the mouse and it's on your clipboard (paste with Cmd+V)
 copy_command "pbcopy"
 copy_on_select true
+
+// Web access (gwm web): the hub can be opened in a browser on your tailnet.
+// The server only ever listens on this Mac (127.0.0.1); Tailscale Serve publishes it over HTTPS to your
+// tailnet only, and every browser must log in with a token (gwm web token). Nothing is exposed otherwise.
+web_sharing "on"
+web_server false
+web_server_ip "127.0.0.1"
+web_server_port 8082
+
+// Don't send session status messages to the outer terminal. Terminals that don't understand them
+// (Terminal.app) print them as text — a string like "26661nCgkKA2d3bRICAQI=" across the screen.
+attention {
+    host_status false
+}
