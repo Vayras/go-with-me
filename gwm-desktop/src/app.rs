@@ -69,6 +69,7 @@ struct NewSession {
     name: String,
     name_edited: bool,
     user: String,
+    more: bool,
 }
 
 /// A session that's being created: shown right away, settled when gwm finishes.
@@ -378,6 +379,7 @@ impl App {
             name: String::new(),
             name_edited: false,
             user: std::env::var("USER").unwrap_or_default(),
+            more: false,
         };
         d.name = self.suggest_name(&d);
         self.dialog = Some(d);
@@ -980,7 +982,9 @@ impl App {
         }
     }
 
-    // ---------- new session dialog: closes at once; the session appears optimistically ----------
+    // ---------- new session dialog ----------
+    // Header (title, close) · machine list · engine cards · "More options" · footer (summary, Cancel, Create).
+    // Closes at once on Create; the session then appears optimistically in the sidebar and as a tab.
     fn dialog_ui(&mut self, ctx: &egui::Context) {
         let Some(mut d) = self.dialog.take() else { return };
         if d.machine.is_empty() {
@@ -990,86 +994,140 @@ impl App {
         let mut keep = true;
         let mut create = false;
         let peer = self.peers.iter().find(|p| p.dns == d.machine && p.saved_as.is_empty()).cloned();
-        let name_taken = self.state.sessions.iter().any(|s| s.name == d.name.trim());
-        let name_ok = !d.name.trim().is_empty() && d.name.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && !name_taken && d.name.trim() != COORD;
+        let name = d.name.trim().to_owned();
+        let name_taken = self.state.sessions.iter().any(|s| s.name == name) || self.pending.iter().any(|p| p.form.name == name);
+        let name_valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && name != COORD;
+        let engine_valid = !d.engine.trim().is_empty() && d.engine.trim().chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+        let user_valid = peer.is_none() || !d.user.trim().is_empty();
+        let ok = name_valid && !name_taken && engine_valid && user_valid && !d.machine.is_empty();
+        let width = 480.0;
         let modal = egui::Modal::new(egui::Id::NULL.with("gwm-new-session"))
-            .frame(Frame::new().fill(theme::ELEVATED).stroke(Stroke::new(1.0, theme::BORDER)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(20)))
+            .frame(Frame::new().fill(theme::ELEVATED).stroke(Stroke::new(1.0, theme::BORDER)).corner_radius(CornerRadius::same(10)))
             .show(ctx, |ui| {
-                ui.set_width(440.0);
-                ui.label(RichText::new("New session").size(17.0).color(theme::TEXT));
-                ui.add_space(2.0);
-                ui.label(RichText::new("A terminal that keeps running on its machine — close the tab anytime, it carries on.").color(theme::FAINT).small());
-                ui.add_space(16.0);
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                // header
+                Frame::new().inner_margin(Margin { left: 20, right: 12, top: 16, bottom: 14 }).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("New session").size(16.0).color(theme::TEXT));
+                            ui.add_space(3.0);
+                            ui.label(RichText::new("A terminal that keeps running on its machine — close the tab anytime.").size(11.5).color(theme::FAINT));
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            if ui.add(egui::Button::new(RichText::new("×").size(16.0).color(theme::MUTED)).fill(Color32::TRANSPARENT).frame(false)).on_hover_text("Close (Esc)").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+                });
+                divider(ui);
 
-                // group 1: where
-                field_label(ui, "Machine");
-                let shown = peer.as_ref().map(|p| format!("{}   ·  new, set up automatically", p.short())).unwrap_or_else(|| d.machine.clone());
-                egui::ComboBox::from_id_salt("machine").width(440.0).selected_text(shown).show_ui(ui, |ui| {
+                // body
+                Frame::new().inner_margin(Margin { left: 20, right: 20, top: 16, bottom: 18 }).show(ui, |ui| {
+                    // 1. where
+                    field_label(ui, "Machine", Some("Where it runs. New tailnet machines are set up for you."));
                     for h in &self.state.hosts {
-                        let label = format!("{}{}", h.name, if h.online == Some(true) { "" } else { "   (offline)" });
-                        ui.selectable_value(&mut d.machine, h.name.clone(), label);
-                    }
-                    let new: Vec<&Peer> = self.peers.iter().filter(|p| p.saved_as.is_empty() && p.online).collect();
-                    if !new.is_empty() {
-                        ui.separator();
-                        ui.label(RichText::new("On your tailnet — set up automatically").color(theme::FAINT).small());
-                        for p in new {
-                            ui.selectable_value(&mut d.machine, p.dns.clone(), format!("{}  · {}", p.short(), p.os));
+                        let (dot, dc) = if h.online == Some(true) { ("●", theme::GREEN) } else { ("○", theme::FAINT) };
+                        let meta = if h.online == Some(true) {
+                            format!("{}{}", if h.name == self.state.me { "this Mac · " } else { "" }, [h.cpu.as_str(), h.ram.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · "))
+                        } else {
+                            "offline".into()
+                        };
+                        if choice_row(ui, d.machine == h.name, dot, dc, &h.name, &meta).clicked() {
+                            d.machine = h.name.clone();
                         }
                     }
-                });
-                if peer.is_some() {
-                    ui.add_space(8.0);
-                    field_label(ui, "Your username there");
-                    ui.add(TextEdit::singleline(&mut d.user).desired_width(440.0).hint_text("run whoami on that machine"));
-                }
-
-                ui.add_space(16.0); // group 2: what
-                field_label(ui, "Engine");
-                ui.horizontal(|ui| {
-                    for e in ["claude", "opencode", "shell"] {
-                        if ui.selectable_label(d.engine == e, e).clicked() {
-                            d.engine = e.into();
+                    let new: Vec<Peer> = self.peers.iter().filter(|p| p.saved_as.is_empty() && p.online).cloned().collect();
+                    for p in &new {
+                        if choice_row(ui, d.machine == p.dns, "+", theme::ACCENT, p.short(), &format!("{} · new — set up automatically", p.os)).clicked() {
+                            d.machine = p.dns.clone();
                         }
                     }
-                    ui.add(TextEdit::singleline(&mut d.engine).desired_width(110.0).hint_text("or any CLI"));
-                });
-                if d.engine == "claude" {
-                    ui.add_space(8.0);
-                    field_label(ui, "Claude account");
-                    ui.add(TextEdit::singleline(&mut d.account).desired_width(440.0).hint_text("default, or a label like work"));
-                }
+                    if peer.is_some() {
+                        ui.add_space(10.0);
+                        field_label(ui, "Your username there", Some("Run whoami on that machine if unsure."));
+                        ui.add(TextEdit::singleline(&mut d.user).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
+                    }
 
-                ui.add_space(16.0); // group 3: details
-                ui.columns(2, |cols| {
-                    field_label(&mut cols[0], "Folder");
-                    cols[0].add(TextEdit::singleline(&mut d.folder).desired_width(f32::INFINITY));
-                    field_label(&mut cols[1], "Tab name");
-                    if cols[1].add(TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY)).changed() {
-                        d.name_edited = true;
+                    // 2. what
+                    ui.add_space(18.0);
+                    field_label(ui, "Engine", None);
+                    let cards = [("claude", "✻", "Claude Code", "Coding agent"), ("opencode", "◇", "opencode", "Local models"), ("shell", "$", "Shell", "Plain terminal")];
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.horizontal(|ui| {
+                        let w = (ui.available_width() - 16.0) / 3.0;
+                        for (key, icon, title, desc) in cards {
+                            if engine_card(ui, w, d.engine == key, icon, title, desc).clicked() {
+                                d.engine = key.into();
+                            }
+                        }
+                    });
+                    let custom = !cards.iter().any(|c| c.0 == d.engine);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("or another CLI").size(11.5).color(theme::FAINT));
+                        let mut other = if custom { d.engine.clone() } else { String::new() };
+                        if ui.add(TextEdit::singleline(&mut other).desired_width(140.0).hint_text("codex, gemini, kimi…").margin(Margin::symmetric(6, 3))).changed() {
+                            d.engine = if other.trim().is_empty() { "claude".into() } else { other };
+                        }
+                    });
+
+                    // 3. more options (collapsed by default)
+                    ui.add_space(16.0);
+                    let label = format!("{}  More options", if d.more { "▾" } else { "▸" });
+                    if ui.add(egui::Label::new(RichText::new(label).size(12.0).color(theme::MUTED)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        d.more = !d.more;
                     }
-                    if name_taken {
-                        cols[1].label(RichText::new("already taken").color(theme::RED).small());
+                    if d.more {
+                        ui.add_space(10.0);
+                        if d.engine == "claude" {
+                            field_label(ui, "Claude account", Some("default, or a label like work (its own login)"));
+                            ui.add(TextEdit::singleline(&mut d.account).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
+                            ui.add_space(10.0);
+                        }
+                        ui.columns(2, |cols| {
+                            field_label(&mut cols[0], "Start folder", None);
+                            cols[0].add(TextEdit::singleline(&mut d.folder).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5)));
+                            field_label(&mut cols[1], "Tab name", None);
+                            if cols[1].add(TextEdit::singleline(&mut d.name).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 5))).changed() {
+                                d.name_edited = true;
+                            }
+                        });
+                    }
+                    if name_taken || !name_valid {
+                        ui.add_space(8.0);
+                        let msg = if name_taken { format!("'{name}' is already a session — pick another tab name under More options") } else { "Tab name: letters, digits, - and _ only".to_owned() };
+                        ui.label(RichText::new(msg).size(11.5).color(theme::RED));
+                    }
+                    if let Some(p) = &peer {
+                        ui.add_space(12.0);
+                        ui.label(RichText::new(format!("{} isn't set up yet. Creating connects over Tailscale SSH and installs tmux and go-with-me there. The session shows up right away while that runs.", p.short())).size(11.5).color(theme::YELLOW));
                     }
                 });
-                if let Some(p) = &peer {
-                    ui.add_space(12.0);
-                    ui.label(RichText::new(format!("{} isn't set up for go-with-me yet. Creating connects over Tailscale SSH, installs tmux and go-with-me there and shares your config. The session shows up right away while that runs.", p.dns)).color(theme::YELLOW).small());
-                }
-                ui.add_space(20.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add_enabled(name_ok, egui::Button::new(RichText::new("Create  ↵").color(theme::EDITOR)).fill(theme::ACCENT).min_size(vec2(96.0, 28.0))).clicked() {
-                        create = true;
-                    }
-                    if ui.add(egui::Button::new("Cancel").fill(Color32::TRANSPARENT).min_size(vec2(72.0, 28.0))).clicked() {
-                        keep = false;
-                    }
+                divider(ui);
+
+                // footer: what will happen, then the actions
+                Frame::new().inner_margin(Margin { left: 20, right: 16, top: 12, bottom: 12 }).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let account = if d.engine == "claude" && d.account.trim() != "default" { format!(" · {}", d.account.trim()) } else { String::new() };
+                        ui.label(RichText::new(format!("{name} · {} on {}{account}", d.engine.trim(), short(&d.machine))).size(11.5).color(theme::FAINT));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if ui.add_enabled(ok, egui::Button::new(RichText::new("Create  ↵").color(theme::EDITOR)).fill(theme::ACCENT).min_size(vec2(92.0, 28.0)).corner_radius(6)).clicked() {
+                                create = true;
+                            }
+                            if ui.add(egui::Button::new("Cancel").fill(theme::HOVER).min_size(vec2(72.0, 28.0)).corner_radius(6)).clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
                 });
             });
         if !d.name_edited {
             d.name = self.suggest_name(&d);
         }
-        if name_ok && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        if ok && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
             create = true;
         }
         if modal.should_close() {
@@ -1195,9 +1253,46 @@ fn note(ui: &mut Ui, text: &str, color: Color32) {
     ui.painter().text(pos2(r.left() + 14.0, r.center().y), Align2::LEFT_CENTER, elide(text, room), FontId::proportional(11.0), color);
 }
 
-fn field_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(11.5).color(theme::MUTED));
-    ui.add_space(2.0);
+fn field_label(ui: &mut Ui, text: &str, help: Option<&str>) {
+    ui.label(RichText::new(text).size(12.0).color(theme::TEXT));
+    if let Some(h) = help {
+        ui.add_space(2.0);
+        ui.label(RichText::new(h).size(11.0).color(theme::FAINT));
+    }
+    ui.add_space(6.0);
+}
+
+fn divider(ui: &mut Ui) {
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().rect_filled(r, 0.0, theme::BORDER_SOFT);
+}
+
+/// One option in a visible list (like a radio): status dot, name, a quiet second fact on the right.
+fn choice_row(ui: &mut Ui, selected: bool, dot: &str, dot_color: Color32, name: &str, meta: &str) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+    let p = ui.painter();
+    let fill = if selected { theme::SELECTED } else if resp.hovered() { theme::HOVER } else { Color32::TRANSPARENT };
+    p.rect_filled(r.shrink2(vec2(0.0, 1.0)), 6.0, fill);
+    if selected {
+        p.rect_stroke(r.shrink2(vec2(0.0, 1.0)), 6.0, Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
+    }
+    p.text(pos2(r.left() + 14.0, r.center().y), Align2::CENTER_CENTER, dot, FontId::proportional(10.0), dot_color);
+    p.text(pos2(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, name, FontId::proportional(13.0), theme::TEXT);
+    p.text(pos2(r.right() - 12.0, r.center().y), Align2::RIGHT_CENTER, meta, FontId::proportional(11.0), theme::FAINT);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A choice card: icon, title, one-line description.
+fn engine_card(ui: &mut Ui, width: f32, selected: bool, icon: &str, title: &str, desc: &str) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(width, 64.0), Sense::click());
+    let p = ui.painter();
+    p.rect_filled(r, 8.0, if selected { theme::SELECTED } else if resp.hovered() { theme::HOVER } else { theme::PANEL });
+    p.rect_stroke(r, 8.0, Stroke::new(1.0, if selected { theme::ACCENT } else { theme::BORDER_SOFT }), egui::StrokeKind::Inside);
+    p.text(pos2(r.left() + 12.0, r.top() + 18.0), Align2::LEFT_CENTER, icon, theme::mono(13.0), if selected { theme::ACCENT } else { theme::MUTED });
+    p.text(pos2(r.left() + 28.0, r.top() + 18.0), Align2::LEFT_CENTER, title, FontId::proportional(13.0), theme::TEXT);
+    let room = ((width - 24.0) / 5.4) as usize;
+    p.text(pos2(r.left() + 12.0, r.top() + 42.0), Align2::LEFT_CENTER, elide(desc, room), FontId::proportional(11.0), theme::FAINT);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A machine: status dot, name, how many sessions, and its load — the header of its group.
