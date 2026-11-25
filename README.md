@@ -62,6 +62,8 @@ gwm             # open the hub
 | Open a tab for a session that isn't running | `gwm open <session>` |
 | Close a session and its tab (its screen is saved to `~/.config/go-with-me/archive/` first; Claude chats are kept) | `gwm close <session>` |
 | Stop it but keep the tab (Enter in the tab restarts it) | `gwm stop <session>` |
+| Start a session **with its agent running** (optionally a first task) | `gwm spawn fix-tests --on macbook --prompt "run the tests and fix failures"` |
+| See closed sessions · bring one back with its Claude conversation | `gwm archive` · `gwm resume <session>` |
 | See everything at a glance / who's using what | `gwm status` · `gwm who` |
 | Read or type into a session from anywhere | `gwm peek <session>` · `gwm send <session> "text"` |
 | Read a session's whole Claude conversation (the coordinator does this for every chat by default) | `gwm history <session>` · `gwm history --all` |
@@ -72,6 +74,9 @@ gwm             # open the hub
 | Linux VMs | `gwm vm create <name> --on <machine> [--cpus 6 --memory 16]` · `gwm vm list` |
 | Local models | `gwm models --on studio` · `gwm pull <model>` · `gwm opencode-setup --on studio` |
 | Copy text | Select it with the mouse; it's copied automatically. Paste with Cmd+V |
+| Paste a screenshot (or files copied in Finder) into a session on **another machine** | **⌥V** in its tab · `gwm paste [session]` · `gwm paste --last` (newest screenshot file) |
+| Send files to a session's machine, from here or from another session | `gwm share report.pdf studio-work` · `gwm share studio:out/chart.png macbook-claude` |
+| Give every machine's Claude a browser (a Chrome window on this Mac) | `gwm chrome` · `gwm chrome status` · `gwm chrome stop` |
 | Open the hub in a browser (your tailnet only) | `gwm web` · `gwm web stop` · `gwm web token` |
 | Leave the hub (everything keeps running) | **⌥Q**, or close the window |
 
@@ -83,10 +88,28 @@ gwm             # open the hub
 | **⌥S** | switch between sidebar and terminal |
 | **⌥N** · **⌥X** · **⌥Z** | new pane · close pane · zoom pane |
 | **⌥O** | open or create a session |
+| **⌥V** | paste a screenshot / copied files into this tab's session (any machine) |
 | **⌥Q** | leave (everything keeps running) |
 | **⌥/** | show all shortcuts (`gwm keys`) |
 
 Click anything in the sidebar too. Select text to copy it.
+
+## Screenshots, files and a browser for remote sessions
+
+Claude Code reads the clipboard of the machine **it runs on**, so ⌃V-ing a screenshot into a session on the Studio
+gets nothing. Instead, press **⌥V** in that tab (or run `gwm paste`). It copies the image to that machine's inbox
+(`~/.cache/go-with-me/inbox/`, cleared after 7 days) and types its path into the prompt, where Claude Code attaches
+it as an image. Then press Enter. With no image on the clipboard, it offers your newest screenshot file. Files copied
+in Finder (⌘C) work too. `gwm share` does the same for any file or folder, including ones on another machine
+(`session:path` or `machine:path`). Add `--no-type` to copy without typing anything into the session.
+
+`gwm chrome` opens a separate Chrome window on the Mac you're at and lets Claude on every machine drive it, through
+[chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) (added to Claude Code on each machine as
+`gwm-chrome`, for each account its sessions use; restart `claude` in sessions that were already running).
+Chrome listens on `127.0.0.1:9339` only, and each other machine reaches it through an SSH reverse tunnel bound to
+*its* `127.0.0.1`, so nothing is exposed on the network. Anything running on those machines as any user can drive
+that browser while it's shared, so it uses its own profile: sign in there only to what agents should use. Sharing
+ends when you quit that window or run `gwm chrome stop`. Lima VMs aren't supported yet.
 
 ## Web access
 

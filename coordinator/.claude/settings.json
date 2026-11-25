@@ -13,7 +13,9 @@
       "Bash(gwm web:*)",
       "Bash(go-with-me run:*)",
       "Bash(go-with-me send:*)",
-      "Bash(ssh:*)"
+      "Bash(ssh:*)",
+      "Bash(gwm spawn:*)",
+      "Bash(gwm resume:*)"
     ]
   }
 }

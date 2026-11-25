@@ -20,13 +20,19 @@
 # Sessions
 #   gwm new [name] [--on machine] [--engine e] [--account a] [--folder f]   start a session (asks what's missing)
 #   gwm open <session>                open a tab for a session that isn't running/open yet (starts it)
-#   gwm close <session> [--yes]       stop a session and remove its tab
+#   gwm close <session> [--yes]       stop a session and remove its tab (its screen + conversation are kept)
+#   gwm archive                       closed sessions you can bring back · gwm resume <session>
+#   gwm spawn <name> --on <machine> [--engine e] [--prompt "task"]   start a session with its agent running
 #   gwm stop <session>                stop what's running but keep the tab (Enter in the tab restarts it)
 #   gwm sessions                      list sessions
 #   gwm peek <session> [lines]        show a session's screen
 #   gwm send <session> <text...>      type text + Enter into a session
 #   gwm history <session>|--all [n]   the session's Claude conversation (last n messages, from its machine)
 #   gwm attach <session>              connect to a session in this terminal (what each tab runs)
+# Files + browser (for sessions on other machines)
+#   gwm paste [session] [--last]      this Mac's clipboard (screenshot / copied files) → that session's machine, path typed in (⌥V)
+#   gwm share <file|session:path|machine:path>… <to-session> [--no-type]   copy files to a session's machine
+#   gwm chrome [start|stop|status] [--to machine]   a Chrome window here that Claude on every machine can drive
 # Machines
 #   gwm hosts                         list machines
 #   gwm run <host> <command...>       run a shell command on a machine
@@ -119,7 +125,7 @@ $2" t; t="$(hfield "$h" 2)"
           run_script "$parent" "limactl shell --workdir / $vm -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
     *) if is_local "$h"; then printf '%s\n' "$s" | env -u TMUX "${SHELL:-/bin/zsh}" -l -s
        else printf '%s\n' "$s" | ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=4 -o ServerAliveInterval=5 \
-              -o ServerAliveCountMax=2 -o LogLevel=ERROR "$t" 'exec "$SHELL" -l -s'; fi ;;
+              -o ServerAliveCountMax=2 -o LogLevel="${GWM_SSH_LOGLEVEL:-ERROR}" "$t" 'exec "$SHELL" -l -s'; fi ;;
   esac
 }
 # run_tty <host> <command>   interactive (needs a terminal)
@@ -189,12 +195,23 @@ demo_probe() {  # fake but lively data for `gwm demo`
   echo "sandbox|H|$((3 + r % 4))%|2/8G|-|-"
   echo "sandbox|S|load-test|1500|0|✳ Load test finished"
 }
+TS_CHECK="Tailscale SSH requires an additional check"
 probe_all() {  # → "host|H|..." and "host|S|..." lines, all hosts in parallel
   [ -n "${GWM_DEMO:-}" ] && { demo_probe; return; }
   local tmp; tmp="$(mktemp -d)"
   while IFS=$'\t' read -r h _; do
-    ( out="$(run_script "$h" "$PROBE" 2>/dev/null | grep -E '^[HSTCIM]\|')"
-      [ -n "$out" ] || out="DOWN"; printf '%s\n' "$out" | sed "s/^/$h|/" > "$tmp/$h" ) &
+    ( o="$tmp/.$h.out" e="$tmp/.$h.err"
+      # (LogLevel INFO: at ERROR, ssh hides the message Tailscale sends when it wants the check.)
+      GWM_SSH_LOGLEVEL=INFO run_script "$h" "$PROBE" >"$o" 2>"$e" & p=$!
+      # Tailscale SSH in "check" mode holds the login until someone approves it in a browser, which
+      # never happens in the background: stop waiting as soon as it asks, and at most after 15 s.
+      for _ in $(seq 1 60); do kill -0 "$p" 2>/dev/null || break; grep -q "$TS_CHECK" "$e" 2>/dev/null && break; sleep 0.25; done
+      kill -0 "$p" 2>/dev/null && { pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; }
+      wait "$p" 2>/dev/null
+      out="$(grep -E '^[HSTCIM]\|' "$o")"
+      # A|<link>: the machine is up but Tailscale wants the login re-approved (open the link, or ssh there once).
+      [ -z "$out" ] && grep -q "$TS_CHECK" "$e" 2>/dev/null && out="A|$(grep -o 'https://login.tailscale.com/[^[:space:]]*' "$e" | head -1)"
+      [ -n "$out" ] || out="DOWN"; printf '%s\n' "$out" | sed "s/^/$h|/" > "$tmp/$h"; rm -f "$o" "$e" ) &
   done < <(hosts)
   wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
 }
@@ -255,6 +272,8 @@ print_table() {
       st="● on"; is_local "$h" && st="● on (here)"; case "$t" in vm:*) st="● vm";; esac
       ub="$(used_by "$h" "$data" "$map")"
       printf "%-12s $(c 32)%-15s$(c 0) %5s %5s %-9s %-16.16s $(c 35)%-26.26s$(c 0) %s\n" "$h" "$st" "$cpu" "${gpu:--}" "$ram" "${vms:--}" "${ub:-—}" "${models:--}"
+    elif grep -q "^$h|A|" <<<"$data"; then
+      printf "%-12s $(c 33)%-15s$(c 0) %s\n" "$h" "◐ approval" "Tailscale SSH wants this login re-approved → ssh ${t} once, or open: $(grep "^$h|A|" <<<"$data" | cut -d'|' -f3)"
     else
       printf "%-12s $(c 31)%-15s$(c 0) %s\n" "$h" "○ offline" "asleep / off / not set up → gwm doctor"
     fi
@@ -271,6 +290,8 @@ print_table() {
       printf "%-14s %-10s %-9s %-10s $(c $col)%-12s$(c 0) %s\n" "$n" "$h" "$e" "$a" "$st" "$title" | cut -c1-$((cols+12))
     elif grep -q "^$h|H|" <<<"$data"; then
       printf "%-14s %-10s %-9s %-10s $(c 2)%-12s %s$(c 0)\n" "$n" "$h" "$e" "$a" "not running" "→ gwm open $n"
+    elif grep -q "^$h|A|" <<<"$data"; then
+      printf "%-14s %-10s %-9s %-10s $(c 33)%-12s$(c 0)\n" "$n" "$h" "$e" "$a" "needs approval"
     else
       printf "%-14s %-10s %-9s %-10s $(c 31)%-12s$(c 0)\n" "$n" "$h" "$e" "$a" "host offline"
     fi
@@ -303,10 +324,11 @@ start_cmd() {  # start_cmd <name> [takeover]: the command that creates-or-attach
   # tmux on the host is only a keep-alive layer: no status bar, no prefix key, so you never have to deal with it
   local quiet="\\; set-option -t '=$PFX$n' status off \\; set-option -t '=$PFX$n' prefix None \\; set-option -t '=$PFX$n' prefix2 None \\; set-option -s escape-time 10"
   local qf; qf="$(qfolder "$f")"
-  local d=""; [ -n "$take" ] && d="-D"
+  [ -n "${START_PROG:-}" ] && prog="$START_PROG"
+  local d=""; [ -n "$take" ] && d="-D"; [ -n "${START_DETACHED:-}" ] && d="-d"
   local scrub="for v in $CLAUDE_MARKERS; do tmux set-environment -g -u \$v 2>/dev/null; done;"   # -D: the other screen lets go (only when you ask for it)
-  [ -n "$env" ] && echo "$scrub mkdir -p $ACCT_DIR/$a; cd $qf 2>/dev/null || cd; tmux new-session -A $d -s $PFX$n $env '$prog' $quiet" \
-                || echo "$scrub cd $qf 2>/dev/null || cd; tmux new-session -A $d -s $PFX$n '$prog' $quiet"
+  [ -n "$env" ] && echo "$scrub mkdir -p $ACCT_DIR/$a; cd $qf 2>/dev/null || cd; tmux new-session $( [ -n "${START_DETACHED:-}" ] || echo -A ) $d -s $PFX$n $env '$prog' $quiet" \
+                || echo "$scrub cd $qf 2>/dev/null || cd; tmux new-session $( [ -n "${START_DETACHED:-}" ] || echo -A ) $d -s $PFX$n '$prog' $quiet"
 }
 # attach_loop <label> <host> <tmux-session> <start-cmd> <takeover-start-cmd>
 # Never steals a session from another screen by itself: if it's open elsewhere, wait (and connect when it's free),
@@ -444,6 +466,40 @@ sync_session() {  # sync_session add <name> <line> | remove <name>: keep every m
     fi || echo "$(c 33)•$(c 0) couldn't update '$h' (offline?) — it'll catch up next time you run gwm add or gwm sync there"
   done < <(hosts)
 }
+start_detached() {  # start_detached <name> <program…>: start a saved session in the background running a program
+  local n="$1" h; h="$(sfield "$n" 2)"
+  START_PROG="unset $CLAUDE_MARKERS; $2; exec \$SHELL -l" START_DETACHED=1 run_script "$h" "$(START_PROG="unset $CLAUDE_MARKERS; $2; exec \$SHELL -l" START_DETACHED=1 start_cmd "$n")" >/dev/null 2>&1
+  run_script "$h" "tmux has-session -t '=$PFX$n' 2>/dev/null && echo GWM_UP" 2>/dev/null | grep -q GWM_UP
+}
+cmd_spawn() {  # gwm spawn <name> --on <machine> [--engine e] [--account a] [--folder f] [--prompt "first task"]
+  local n="" h="" e="claude" a="default" f="~" prompt=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --on) h="$2"; shift 2;; --engine) e="$2"; shift 2;; --account) a="$2"; shift 2;; --folder) f="$2"; shift 2;;
+    --prompt) prompt="$2"; shift 2;; *) n="$1"; shift;; esac; done
+  [ -n "$n" ] && [ -n "$h" ] || die "usage: gwm spawn <name> --on <machine> [--engine claude] [--account a] [--folder f] [--prompt \"task\"]"
+  [ "$e" = claude ] || a="-"
+  sfield "$n" 1 >/dev/null 2>&1 || GWM_NO_TAB=1 cmd_new "$n" --on "$h" --engine "$e" --account "$a" --folder "$f" </dev/null >/dev/null || exit 1
+  local program="$e"
+  [ "$e" = shell ] && program="true"
+  [ -n "$prompt" ] && [ "$e" = claude ] && program="claude \"\$(printf %s $(b64 "$prompt") | base64 -d)\""
+  start_detached "$n" "$program" || die "couldn't start '$n' on $h"
+  if [ -n "$prompt" ] && [ "$e" != claude ] && [ "$e" != shell ]; then sleep 4; cmd_send "$n" "$prompt" >/dev/null; fi
+  open_tab "$n" || true
+  echo "$(c 32)✓$(c 0) Spawned '$n' on $h — $e is running$([ -n "$prompt" ] && echo " with its first task")."
+}
+cmd_resume() {  # gwm resume <name>: bring back a closed session, reopening its Claude conversation
+  local n="${1:-}"; [ -n "$n" ] || die "usage: gwm resume <session>   (see: gwm archive)"
+  sfield "$n" 1 >/dev/null 2>&1 && die "'$n' is already a saved session — open it with: gwm open $n"
+  local rec; rec="$(archive_records | awk -F'\t' -v n="$n" '$1==n' | sort -t$'\t' -k7 | tail -1)"
+  [ -n "$rec" ] || die "no closed session called '$n' (see: gwm archive)"
+  local h e a f sid; IFS=$'\037' read -r _ h e a f _ _ sid _ <<<"$(tr '\t' '\037' <<<"$rec")"
+  need_host "$h"; [[ "$sid" =~ ^[A-Za-z0-9-]*$ ]] || die "bad conversation id in the archive record"
+  GWM_NO_TAB=1 cmd_new "$n" --on "$h" --engine "$e" --account "${a:-default}" --folder "${f:-~}" </dev/null >/dev/null || exit 1
+  if [ "$e" = claude ] && [ -n "$sid" ]; then start_detached "$n" "claude --resume $sid" || die "couldn't start '$n' on $h"
+  else start_detached "$n" "true" || die "couldn't start '$n' on $h"; fi
+  open_tab "$n" || true
+  echo "$(c 32)✓$(c 0) Resumed '$n' on $h$([ -n "$sid" ] && echo " — Claude reopened its conversation")."
+}
 cmd_pick() {  # ⌥O: open a saved session, or create one with a new name
   echo "$(c 1)Open a session$(c 0)"; echo
   sessions | awk -F'\t' '{printf "  %-16s %s on %s\n", $1, $3, $2}'; echo
@@ -486,20 +542,29 @@ cmd_new() {
   local line; line="$(printf '%-14s| %-8s| %-9s| %-8s| %s' "$n" "$h" "$e" "$a" "$f")"
   printf '%s\n' "$line" >> "$SESSIONS"
   sync_session add "$n" "$line"
-  open_tab "$n"
+  [ -n "${GWM_NO_TAB:-}" ] || open_tab "$n"
   echo "$(c 32)✓$(c 0) Added '$n' ($e on $h$([ "$e" = claude ] && echo ", account $a"))."
   hub_running && echo "  Its tab is open in the hub." || echo "  Open the hub with: gwm"
   [ "$e" = claude ] && [ "$a" != default ] && echo "  First time with account '$a' on $h? Sign in inside the tab, or: gwm login $a --on $h"
+  return 0
 }
 cmd_close() {
   local n="" yes=""; for x in "$@"; do case "$x" in -y|--yes) yes=1;; *) n="$x";; esac; done
-  [ -n "$n" ] || die "usage: gwm close <session> [--yes]"; need_session "$n"
-  local h; h="$(sfield "$n" 2)"
+  [ -n "$n" ] || die "usage: gwm close <session> [--yes]"
+  [[ "$n" =~ $NAME_RE ]] || die "unknown session '$n'"
+  local h
+  if sfield "$n" 1 >/dev/null 2>&1; then h="$(sfield "$n" 2)"
+  else  # not saved anywhere, but maybe still running on one of the machines
+    h="$(probe_cached 5 | awk -F'|' -v n="$n" '$2=="S" && $3==n {print $1; exit}')"
+    [ -n "$h" ] || die "no session called '$n' is saved or running (gwm sessions · gwm status)"
+  fi
   if [ -z "$yes" ]; then
     [ -t 0 ] || die "add --yes to confirm closing '$n'"
     printf "Close '%s'? It stops on %s and its tab goes away (its screen is saved to the archive first). [y/N] " "$n" "$h"; read -r r
     case "$r" in y|Y|yes) ;; *) echo "Cancelled."; return;; esac
   fi
+  if sfield "$n" 1 >/dev/null 2>&1; then save_record "$h" "$n" "$(sfield "$n" 3)" "$(sfield "$n" 4)" "$(sfield "$n" 5)"
+  else save_record "$h" "$n" claude default "~"; fi
   run_script "$h" "$(archive_cmd "$n"); tmux kill-session -t '=$PFX$n' 2>/dev/null" || true
   awk -F'|' -v n="$n" '{v=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$SESSIONS" > "$SESSIONS.new" && mv "$SESSIONS.new" "$SESSIONS"
   sync_session remove "$n"
@@ -510,12 +575,22 @@ cmd_peek() { local n="$1" k="${2:-40}"; need_session "$n"
   run_script "$(sfield "$n" 2)" "tmux capture-pane -p -J -t '=$PFX$n:' -S -$k 2>/dev/null | awk 'NF{p=NR} {l[NR]=\$0} END{for(i=1;i<=p;i++) print l[i]}' || echo '(session $n is not running)'"; }
 cmd_send() { local n="$1"; shift; need_session "$n"
   run_script "$(sfield "$n" 2)" "printf %s $(b64 "$*") | base64 -d | tmux load-buffer -b gwm - && tmux paste-buffer -d -b gwm -t '=$PFX$n:' && sleep 0.3 && tmux send-keys -t '=$PFX$n:' Enter && echo 'sent to $n'"; }
+history_run() {  # history_run <host> <name> <lines|-1> <folder> <config-dir> [transcript]
+  run_script "$1" "python3 -c \"\$(printf %s $(base64 < "$DIR/history.py" | tr -d '\n') | base64 -d)\" '$2' '$3' $(qfolder "$4") \"$5\" \"${6:-}\""
+}
+acct_dir() { if [ -n "${1:-}" ] && [ "$1" != default ] && [ "$1" != - ]; then echo "\$HOME/.config/go-with-me/accounts/$1"; else echo "\$HOME/.claude"; fi; }
 cmd_history() {  # gwm history <session>|--all [lines]: the session's Claude conversation, from the machine it runs on
   local n="${1:-}" k="${2:-40}"; [ -n "$n" ] || die "usage: gwm history <session>|--all [lines]"
   if [ "$n" = --all ]; then
     sessions | awk -F'\t' '$3=="claude"{print $1}' | while read -r x; do cmd_history "$x" "$k"; echo; echo "────────"; done; return
   fi
-  need_session "$n"
+  if ! sfield "$n" 1 >/dev/null 2>&1; then   # closed? use its archive record
+    local rec; rec="$(archive_records | awk -F'\t' -v n="$n" '$1==n' | sort -t$'\t' -k7 | tail -1)"
+    [ -n "$rec" ] || die "unknown session '$n' (gwm sessions · gwm archive)"
+    local rh rt; rh="$(cut -f2 <<<"$rec")"; rt="$(cut -f9 <<<"$rec")"
+    [ -n "$rt" ] || die "'$n' was closed without a Claude conversation"
+    history_run "$rh" "$n" "$k" "~" "" "$rt"; return
+  fi
   local a f cfgdir; a="$(sfield "$n" 4)"; f="$(sfield "$n" 5)"; [ -n "$f" ] || f="~"
   if [ -n "$a" ] && [ "$a" != default ] && [ "$a" != - ]; then cfgdir="\$HOME/.config/go-with-me/accounts/$a"; else cfgdir="\$HOME/.claude"; fi
   run_script "$(sfield "$n" 2)" "python3 -c \"\$(printf %s $(base64 < "$DIR/history.py" | tr -d '\n') | base64 -d)\" '$n' '$k' $(qfolder "$f") \"$cfgdir\""
@@ -523,12 +598,46 @@ cmd_history() {  # gwm history <session>|--all [lines]: the session's Claude con
 # archive_cmd <session>: save everything on the session's screen (and its scrollback) before it's stopped.
 # Claude's own conversation files (~/.claude/projects) are never touched.
 archive_cmd() { echo "mkdir -p ~/.config/go-with-me/archive && tmux capture-pane -p -J -S - -E - -t '=$PFX$1:' > ~/.config/go-with-me/archive/$1-\$(date +%Y%m%d-%H%M%S).txt 2>/dev/null && echo \"saved its screen to ~/.config/go-with-me/archive/\" ||  true"; }
+# save_record <host> <name> <engine> <account> <folder>: remember which conversation a session had, so it can be resumed
+save_record() {
+  local h="$1" n="$2" e="$3" a="$4" f="$5" info rec
+  info=""
+  [ "$e" = claude ] && info="$(history_run "$h" "$n" -1 "$f" "$(acct_dir "$a")" 2>/dev/null | tail -1)"
+  [ -n "$info" ] || info='{}'
+  rec="$(INFO="$info" python3 -c 'import json,os,sys,time
+i = json.loads(os.environ["INFO"] or "{}"); n,h,e,a,f = sys.argv[1:6]
+print(json.dumps({"name": n, "host": h, "engine": e, "account": a, "folder": f, "closed": time.strftime("%Y-%m-%d %H:%M"),
+  "title": i.get("title",""), "session_id": i.get("session_id",""), "transcript": i.get("transcript","")}))' "$n" "$h" "$e" "$a" "$f")"
+  run_script "$h" "mkdir -p ~/.config/go-with-me/archive && printf %s $(b64 "$rec") | base64 -d > ~/.config/go-with-me/archive/$n-\$(date +%Y%m%d-%H%M%S).json" >/dev/null 2>&1
+  [ -n "$(sed -n 's/.*"session_id": "\([^"]*\)".*/\1/p' <<<"$rec")" ] && echo "saved its Claude conversation for later — resume with: gwm resume $n"
+}
+archive_records() {  # every closed-session record on every machine: name host engine account folder title closed session_id transcript
+  while IFS=$'\t' read -r h t _; do
+    case "$t" in vm:*) continue;; esac
+    run_script "$h" 'for f in ~/.config/go-with-me/archive/*.json; do [ -f "$f" ] && { cat "$f"; echo; }; done; true' 2>/dev/null
+  done < <(hosts) | python3 -c 'import json,sys
+for l in sys.stdin:
+    l=l.strip()
+    if not l: continue
+    try: r=json.loads(l)
+    except ValueError: continue
+    print("\t".join(str(r.get(k,"")).replace("\t"," ") for k in ("name","host","engine","account","folder","title","closed","session_id","transcript")))'
+}
+cmd_archive() {
+  local recs; recs="$(archive_records)"
+  [ -n "$recs" ] || { echo "No closed sessions yet."; return; }
+  printf "$(c 1)%-16s %-9s %-8s %-9s %-17s %s$(c 0)\n" SESSION MACHINE ENGINE ACCOUNT CLOSED "CONVERSATION"
+  sort -t$'\t' -k7 -r <<<"$recs" | awk -F'\t' '{printf "%-16s %-9s %-8s %-9s %-17s %s\n", $1, $2, $3, $4, $7, ($8!="" ? ($6!="" ? $6 : "(untitled)") : "—")}'
+  echo; echo "Bring one back with: gwm resume <session>   ·   read one: gwm history <session>"
+}
 cmd_stop() { local n="$1"; need_session "$n"
+  save_record "$(sfield "$n" 2)" "$n" "$(sfield "$n" 3)" "$(sfield "$n" 4)" "$(sfield "$n" 5)"
   run_script "$(sfield "$n" 2)" "$(archive_cmd "$n"); tmux kill-session -t '=$PFX$n' 2>/dev/null; echo 'stopped $n — its tab stays; press Enter there to start it fresh'"; }
 cmd_who() {  # who is using which machine right now
   local data map; data="$(probe_all)"; map="$(ip_map)"
   while IFS=$'\t' read -r h _; do
     if grep -q "^$h|H|" <<<"$data"; then ub="$(used_by "$h" "$data" "$map")"; printf "%-12s %s\n" "$h" "${ub:-nobody else}"
+    elif grep -q "^$h|A|" <<<"$data"; then printf "%-12s %s\n" "$h" "needs approval (Tailscale SSH check)"
     else printf "%-12s %s\n" "$h" "offline"; fi
   done < <(hosts)
 }
@@ -728,6 +837,7 @@ $(c '1;38;5;209')go-with-me shortcuts$(c 0)   ⌥ = Option
   $(c 1)⌥X$(c 0)         close the pane
   $(c 1)⌥Z$(c 0)         zoom the pane full screen (again to undo)
   $(c 1)⌥O$(c 0)         open or create a session
+  $(c 1)⌥V$(c 0)         paste a screenshot (or copied files) into this tab's session, even on another machine
   $(c 1)⌥Q$(c 0)         leave the hub — everything keeps running
   $(c 1)⌥/$(c 0)         this list
 
@@ -737,6 +847,217 @@ $(c '1;38;5;209')go-with-me shortcuts$(c 0)   ⌥ = Option
   ⌥ not working? In Terminal.app run:  gwm keys --setup   (then open a new window)
 EOF
   if [ -n "${ZELLIJ:-}" ] && [ -t 0 ]; then printf '\n  press any key to close'; read -rsn1 _; fi
+}
+
+# ---------- files: screenshots and files into any session (gwm paste / gwm share) ----------
+# Claude Code reads the clipboard of the machine it runs on, so ⌘V-ing a screenshot into a session that runs on
+# another machine gets nothing. Instead: copy the file to that machine's inbox (~/.cache/go-with-me/inbox, cleared
+# after 7 days) and type its path into the session. Claude Code turns a pasted image path into an attached image.
+INBOX='.cache/go-with-me/inbox'
+pipe_host() {  # pipe_host <host> <sh script>: run it on a host with stdin/stdout passed straight through (for files)
+  local h="$1" s="$PATHFIX; $2" t; t="$(hfield "$h" 2)"
+  case "$t" in
+    vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
+          pipe_host "$parent" "limactl shell --workdir / $vm -- sh -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
+    *) if is_local "$h"; then sh -c "$s"
+       else ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o LogLevel=ERROR "$t" \
+              "sh -c \"\$(printf %s $(b64 "$s") | base64 -d)\""; fi ;;
+  esac
+}
+recv_script() {  # a tar stream on stdin → unpacked into a new inbox folder; prints the path of each item
+  printf '%s' "set -e; i=\"\$HOME/$INBOX\"; mkdir -p \"\$i\"
+find \"\$i\" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+d=\"\$i/$1\"; mkdir -p \"\$d\"; tar -xf - -C \"\$d\" || { rm -rf \"\$d\"; exit 1; }; ls -A \"\$d\" | while IFS= read -r f; do echo \"\$d/\$f\"; done"
+}
+stamp() { echo "$(date +%Y%m%d-%H%M%S)-$RANDOM"; }
+send_local() {  # send_local <host> <path…>: copy files/folders from this machine into <host>'s inbox
+  local h="$1" p args=(); shift
+  for p in "$@"; do p="$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"; args+=(-C "$(dirname "$p")" "./$(basename "$p")"); done
+  ( set -o pipefail; COPYFILE_DISABLE=1 tar -cf - "${args[@]}" | pipe_host "$h" "$(recv_script "$(stamp)")" )
+}
+send_remote() {  # send_remote <from-host> <from-folder> <path> <to-host>: copy a file/folder between two machines
+  local src="$1" folder="$2" p="$3" dst="$4"
+  ( set -o pipefail
+    pipe_host "$src" "cd $(qfolder "$folder") 2>/dev/null || cd; p=\"\$(printf %s $(b64 "$p") | base64 -d)\"
+case \"\$p\" in '~') p=\"\$HOME\";; '~/'*) p=\"\$HOME/\${p#??}\";; esac
+[ -e \"\$p\" ] || { echo \"go-with-me: no such file on $src: \$p\" >&2; exit 1; }
+p=\"\$(cd \"\$(dirname \"\$p\")\" && pwd)/\$(basename \"\$p\")\"
+COPYFILE_DISABLE=1 tar -cf - -C \"\$(dirname \"\$p\")\" \"./\$(basename \"\$p\")\"" | pipe_host "$dst" "$(recv_script "$(stamp)")" )
+}
+target_session() {  # target_session [name] → "name<TAB>host<TAB>tmux-session"; no name = the hub tab you're looking at
+  local n="${1:-}"
+  if [ -z "$n" ]; then
+    [ -n "${ZELLIJ_SESSION_NAME:-}" ] || die "which session? Give its name (gwm sessions), or run this from the hub (⌥V)"
+    n="$(zellij --session "$ZELLIJ_SESSION_NAME" action current-tab-info 2>/dev/null | sed -n 's/^name: *\([0-9]* \)\{0,1\}//p')"
+    [ "$n" = overview ] && n=coordinator
+    [ -n "$n" ] || die "couldn't tell which tab you're on — give the session name"
+  fi
+  if [ "$n" = coordinator ]; then printf 'coordinator\t%s\t%scoordinator\n' "$(coord_host)" "$PFX"; return; fi
+  need_session "$n"; printf '%s\t%s\t%s%s\n' "$n" "$(sfield "$n" 2)" "$PFX" "$n"
+}
+type_into() {  # type_into <host> <tmux-session> <text>: paste text into a session (bracketed paste, no Enter)
+  run_script "$1" "printf %s $(b64 "$3") | base64 -d | tmux load-buffer -b gwmfile - && tmux paste-buffer -p -d -b gwmfile -t '=$2:' && echo GWM_TYPED" 2>/dev/null | grep -q GWM_TYPED
+}
+deliver() {  # deliver <name> <host> <tmux-session> <no-type> <paths on that host…>: type the paths in, or just print them
+  local n="$1" h="$2" ts="$3" notype="$4" p text=""; shift 4
+  [ $# -gt 0 ] || die "nothing arrived on $h (offline? gwm doctor)"
+  for p in "$@"; do text="$text${p// /\\ } "; done   # spaces escaped, the way a drag-and-drop types them
+  if [ -z "$notype" ] && type_into "$h" "$ts" "$text"; then
+    echo "$(c 32)✓$(c 0) Copied to $h and typed into '$n' (press Enter there to send it):"
+  elif [ -z "$notype" ]; then echo "$(c 33)•$(c 0) '$n' isn't running, so nothing was typed. The files are on $h:"
+  else echo "$(c 32)✓$(c 0) Copied to $h:"; fi
+  printf '  %s\n' "$@"
+}
+CLIP_JXA='ObjC.import("AppKit");
+function run(argv) {   // argv: <png path> [pasteboard name]   → "F<TAB>path" per copied file, or "I<TAB>png path", or ""
+  var pb = argv[1] ? $.NSPasteboard.pasteboardWithName(argv[1]) : $.NSPasteboard.generalPasteboard;
+  var urls = pb.readObjectsForClassesOptions($([$.NSURL]), $({"NSPasteboardURLReadingFileURLsOnlyKey": true}));
+  if (urls && !urls.isNil() && urls.count > 0) { var r = []; for (var i = 0; i < urls.count; i++) r.push("F\t" + urls.objectAtIndex(i).path.js); return r.join("\n"); }
+  var png = pb.dataForType("public.png");
+  if (png.isNil()) { var tiff = pb.dataForType("public.tiff"); if (tiff.isNil()) return "";
+    png = $.NSBitmapImageRep.imageRepWithData(tiff).representationUsingTypeProperties(4, $({})); }   // 4 = PNG
+  return png.writeToFileAtomically(argv[0], true) ? "I\t" + argv[0] : "";
+}'
+clip_grab() {  # clip_grab <dir>: what's on this Mac's clipboard → "F<TAB>path" lines (copied files) or "I<TAB>png"
+  [ "$(uname)" = Darwin ] || return 0
+  osascript -l JavaScript -e "$CLIP_JXA" "$1/screenshot-$(date +%H%M%S).png" ${GWM_PASTEBOARD:+"$GWM_PASTEBOARD"} 2>/dev/null
+}
+newest_screenshot() {  # the newest image in the folder macOS saves screenshots to
+  local d; d="$(defaults read com.apple.screencapture location 2>/dev/null)"; d="${d/#\~/$HOME}"; [ -d "$d" ] || d="$HOME/Desktop"
+  ls -t "$d"/*.png "$d"/*.jpg "$d"/*.jpeg 2>/dev/null | head -1
+}
+cmd_paste() {  # gwm paste [session] [--last] [--no-type]
+  local n="" last="" notype="" a t name h ts tmp kind p files=() out=()
+  for a in "$@"; do case "$a" in --last) last=1;; --no-type) notype=1;; -*) die "usage: gwm paste [session] [--last] [--no-type]";; *) n="$a";; esac; done
+  t="$(target_session "$n")" || exit 1; IFS=$'\t' read -r name h ts <<<"$t"
+  tmp="$(mktemp -d)"
+  if [ -z "$last" ]; then
+    while IFS=$'\t' read -r kind p; do [ -n "$p" ] && files+=("$p"); done < <(clip_grab "$tmp")
+  fi
+  if [ ${#files[@]} -eq 0 ]; then
+    p="$(newest_screenshot)"
+    if [ -z "$last" ]; then
+      { [ -n "$p" ] && [ -t 0 ]; } || { rm -rf "$tmp"; die "no image or copied file on the clipboard (copy a screenshot with ⌃⇧⌘4, or: gwm paste --last)"; }
+      echo "Nothing on the clipboard. Send your newest screenshot instead?"
+      echo "  $(c 1)$(basename "$p")$(c 0)  $(c 2)($(( ($(date +%s) - $(mtime "$p")) / 60 )) min ago)$(c 0)"
+      printf "Enter = send it, anything else = cancel: "; a=""; IFS= read -rsn1 a; echo
+      [ -z "$a" ] || { rm -rf "$tmp"; echo "Cancelled."; return; }
+    fi
+    [ -n "$p" ] || { rm -rf "$tmp"; die "no screenshots found"; }
+    files=("$p")
+  fi
+  while IFS= read -r p; do [ -n "$p" ] && out+=("$p"); done < <(send_local "$h" "${files[@]}")
+  rm -rf "$tmp"
+  [ ${#out[@]} -gt 0 ] || die "couldn't copy to $h (offline? gwm doctor)"
+  deliver "$name" "$h" "$ts" "$notype" "${out[@]}"
+}
+cmd_share() {  # gwm share <file | session:path | machine:path>… <to-session> [--no-type]
+  local notype="" items=() a
+  for a in "$@"; do case "$a" in --no-type) notype=1;; *) items+=("$a");; esac; done
+  [ ${#items[@]} -ge 2 ] || die "usage: gwm share <file | session:path | machine:path>… <to-session> [--no-type]"
+  local last=$(( ${#items[@]} - 1 )); local to="${items[$last]}"; unset "items[$last]"
+  local t name h ts; t="$(target_session "$to")" || exit 1; IFS=$'\t' read -r name h ts <<<"$t"
+  local locals=() out=() p src path folder
+  for a in "${items[@]}"; do
+    if [ -e "$a" ]; then locals+=("$a"); continue; fi
+    src="${a%%:*}"; path="${a#*:}"
+    { [ "$src" != "$a" ] && [ -n "$path" ]; } || die "'$a' isn't a file here, or session:path / machine:path"
+    if [ "$src" = coordinator ]; then folder="~"; src="$(coord_host)"
+    elif sfield "$src" 1 >/dev/null 2>&1; then folder="$(sfield "$src" 5)"; src="$(sfield "$src" 2)"
+    elif hfield "$src" 1 >/dev/null 2>&1; then folder="~"
+    else die "'$src' is neither a session nor a machine (gwm sessions · gwm hosts)"; fi
+    while IFS= read -r p; do [ -n "$p" ] && out+=("$p"); done < <(send_remote "$src" "$folder" "$path" "$h")
+  done
+  if [ ${#locals[@]} -gt 0 ]; then while IFS= read -r p; do [ -n "$p" ] && out+=("$p"); done < <(send_local "$h" "${locals[@]}"); fi
+  [ ${#out[@]} -gt 0 ] || die "nothing was copied to $h"
+  deliver "$name" "$h" "$ts" "$notype" "${out[@]}"
+}
+
+# ---------- a browser for every session (gwm chrome) ----------
+# One Chrome window on the Mac you're sitting at, that Claude sessions on any machine can drive (through the
+# chrome-devtools-mcp server). Chrome takes remote control on 127.0.0.1 only; each other machine gets an SSH reverse
+# tunnel to it on its own 127.0.0.1, so nothing is opened on the network. It's a separate Chrome profile (Chrome
+# refuses remote control of your normal one) — sign in there only to what the agents should use.
+CHROME_PORT=9339
+CHROME_DIR="$CFG/chrome"
+CHROME_MCP=gwm-chrome
+chrome_up() { curl -s -m 1 "http://127.0.0.1:$CHROME_PORT/json/version" 2>/dev/null | grep -q '"Browser"'; }
+chrome_pids() { pgrep -f -- "--user-data-dir=$CHROME_DIR/profile" 2>/dev/null; }
+chrome_start() {
+  chrome_up && return 0
+  [ "$(uname)" = Darwin ] || die "gwm chrome runs on a Mac (the one you're sitting at)"
+  open -Ra "Google Chrome" 2>/dev/null || die "Google Chrome isn't installed"
+  mkdir -p "$CHROME_DIR/profile"
+  open -na "Google Chrome" --args --user-data-dir="$CHROME_DIR/profile" --remote-debugging-port=$CHROME_PORT \
+    --no-first-run --no-default-browser-check
+  local _; for _ in $(seq 1 60); do chrome_up && return 0; sleep 0.25; done
+  die "Chrome opened but its remote-control port ($CHROME_PORT) didn't come up — is another app using it?"
+}
+tunnel_pid() { local f="$CHROME_DIR/tunnel-$1.pid" p; [ -f "$f" ] && p="$(cat "$f")" && kill -0 "$p" 2>/dev/null && echo "$p"; }
+cmd_chrome_tunnel() {  # (runs in the background) keep <host>'s 127.0.0.1:PORT pointing at this Mac's browser while it's open
+  local h="$1" t wait=5 p up; t="$(hfield "$h" 2)"
+  while chrome_up; do
+    ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -R "127.0.0.1:$CHROME_PORT:127.0.0.1:$CHROME_PORT" "$t" & p=$!
+    up=0; while kill -0 "$p" 2>/dev/null && chrome_up; do sleep 5; up=$((up+5)); done
+    kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+    if [ "$up" -gt 30 ]; then wait=5; elif [ "$wait" -lt 60 ]; then wait=$((wait * 2)); fi   # offline / port taken: back off
+    chrome_up && sleep "$wait"
+  done
+  rm -f "$CHROME_DIR/tunnel-$h.pid"
+}
+chrome_mcp_add() {  # chrome_mcp_add <host>: add the browser tools to Claude Code there, for every account its sessions use
+  local h="$1" a env s="" accts
+  accts="$( { echo default; sessions | awk -F'\t' -v h="$h" '$2==h && $3=="claude" && $4!="-"{print $4}'; } | sort -u)"
+  for a in $accts; do
+    env=""; [ "$a" != default ] && env="CLAUDE_CONFIG_DIR=$ACCT_DIR/$a"
+    s="$s
+if [ $a = default ] || [ -d $ACCT_DIR/$a ]; then
+  if env $env claude mcp get $CHROME_MCP >/dev/null 2>&1; then echo '    account $a: ready'
+  elif env $env claude mcp add --scope user $CHROME_MCP -- npx -y chrome-devtools-mcp@latest --browser-url=http://127.0.0.1:$CHROME_PORT >/dev/null 2>&1
+    then echo '    account $a: added the browser tools (new claude runs get them; restart ones already running)'
+  else echo '    account $a: could not add the browser tools'; fi
+fi"
+  done
+  run_script "$h" "command -v claude >/dev/null || { echo '    (Claude Code not installed there)'; exit 0; }
+command -v npx >/dev/null || echo '    note: the browser tools need Node.js there (brew install node)'$s" 2>/dev/null || echo "    (couldn't reach it)"
+}
+chrome_hosts() {  # machines the browser is shared with: the --to ones, or every machine (not Lima VMs yet)
+  if [ $# -gt 0 ]; then local x; for x in "$@"; do need_host "$x"; echo "$x"; done
+  else hosts | awk -F'\t' '$2 !~ /^vm:/{print $1}'; fi
+}
+cmd_chrome() {  # gwm chrome [start|stop|status] [--to machine]…
+  local sub=start; case "${1:-}" in start|stop|status) sub="$1"; shift;; esac
+  local to=(); while [ $# -gt 0 ]; do case "$1" in --to) [ $# -ge 2 ] || die "--to needs a machine"; to+=("$2"); shift 2;; *) die "usage: gwm chrome [start|stop|status] [--to machine]…";; esac; done
+  mkdir -p "$CHROME_DIR"
+  local h p f r
+  case "$sub" in
+    start)
+      chrome_start
+      echo "$(c 32)✓$(c 0) The go-with-me browser is open on this Mac (its own Chrome window and profile)."
+      for h in $(chrome_hosts ${to[@]+"${to[@]}"}); do
+        echo "$(c 1)$h$(c 0)$(is_local "$h" && echo ' (here)')"
+        if ! is_local "$h" && [ -z "$(tunnel_pid "$h")" ]; then
+          nohup "$ME" _chrome-tunnel "$h" >"$CHROME_DIR/tunnel-$h.log" 2>&1 </dev/null & echo $! > "$CHROME_DIR/tunnel-$h.pid"
+        fi
+        chrome_mcp_add "$h"
+      done
+      echo
+      echo "Claude sessions use it through the $(c 1)$CHROME_MCP$(c 0) tools — just ask Claude to open a page. Check: gwm chrome status"
+      echo "$(c 2)It stays shared until you quit that Chrome window or run gwm chrome stop. One Mac at a time can share its browser to a machine.$(c 0)" ;;
+    stop)
+      for f in "$CHROME_DIR"/tunnel-*.pid; do [ -f "$f" ] || continue; p="$(cat "$f")"; pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; rm -f "$f"; done
+      p="$(chrome_pids)"; [ -n "$p" ] && kill $p 2>/dev/null
+      echo "$(c 32)✓$(c 0) Closed the go-with-me browser and stopped sharing it (its profile and sign-ins stay in $CHROME_DIR)." ;;
+    status)
+      if chrome_up; then echo "Browser: $(c 32)● open$(c 0) on this Mac (port $CHROME_PORT)"; else echo "Browser: $(c 2)○ not open here$(c 0) → gwm chrome"; fi
+      for h in $(chrome_hosts ${to[@]+"${to[@]}"}); do
+        r="$(run_script "$h" "curl -s -m 2 http://127.0.0.1:$CHROME_PORT/json/version >/dev/null 2>&1 && echo GWM_REACH; command -v claude >/dev/null && claude mcp get $CHROME_MCP >/dev/null 2>&1 && echo GWM_MCP" 2>/dev/null)"
+        printf '  %-12s %s · %s\n' "$h" \
+          "$(grep -q GWM_REACH <<<"$r" && echo "$(c 32)reaches a browser$(c 0)" || echo "$(c 31)no browser$(c 0)")" \
+          "$(grep -q GWM_MCP <<<"$r" && echo "tools added" || echo "tools not added (default account) → gwm chrome")"
+      done ;;
+  esac
 }
 
 # ---------- web access (gwm web) ----------
@@ -1027,6 +1348,7 @@ case "${1:-open}" in
   attach-coordinator) cmd_attach_coordinator ;;
   coordinator) shift; cmd_coordinator "$@" ;;
   history) shift; cmd_history "$@" ;;
+  archive) cmd_archive ;;  resume) shift; cmd_resume "$@" ;;  spawn) shift; cmd_spawn "$@" ;;
   new) shift; cmd_new "$@" ;;
   close) shift; cmd_close "$@" ;;
   stop|restart) [ $# -ge 2 ] || die "usage: gwm stop <session>"; cmd_stop "$2" ;;
@@ -1035,6 +1357,10 @@ case "${1:-open}" in
   attach)  [ $# -ge 2 ] || die "usage: gwm attach <session>"; cmd_attach "$2" ;;
   peek)    [ $# -ge 2 ] || die "usage: gwm peek <session> [lines]"; cmd_peek "$2" "${3:-40}" ;;
   send)    [ $# -ge 3 ] || die "usage: gwm send <session> <text>"; shift; cmd_send "$@" ;;
+  paste)   shift; cmd_paste "$@" ;;
+  share)   shift; cmd_share "$@" ;;
+  chrome)  shift; cmd_chrome "$@" ;;
+  _chrome-tunnel) need_host "$2"; cmd_chrome_tunnel "$2" ;;
   run)     [ $# -ge 3 ] || die "usage: gwm run <host> <command>"; shift; cmd_run "$@" ;;
   doctor) cmd_doctor ;;
   accounts) shift; cmd_accounts "$@" ;;  login) shift; cmd_login "$@" ;;

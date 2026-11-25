@@ -56,6 +56,8 @@ def load_data():
             if kind == "H":
                 p += [""] * 7
                 d.update(up=True, cpu=p[2], ram=p[3], models=p[4], vms=p[5], gpu=p[6], mlist=d.get("mlist", []))
+            elif kind == "A":                      # up, but Tailscale SSH wants the login re-approved
+                d["approval"] = p[2] if len(p) > 2 else ""
             elif kind == "M" and len(p) >= 4:
                 d.setdefault("mlist", []).append((p[2].replace(":latest", ""), p[3], p[4] if len(p) > 4 else ""))
 
@@ -84,12 +86,69 @@ def load_tabs():
         tabs["active"] = next((t["name"] for t in lst if t["active"]), None)
 
 
+CFG = os.environ.get("GWM_CONFIG") or os.path.expanduser("~/.config/go-with-me")
+HUB = os.environ.get("ZELLIJ_SESSION_NAME", "")
+seen_running = None   # sessions that were running at the previous check (None = first look)
+
+
+def is_leader():
+    """Only one sidebar per hub keeps the tabs in step (every tab has its own sidebar)."""
+    if not HUB:
+        return False
+    lock = os.path.join(CFG, f".sidebar-leader-{HUB}")
+    try:
+        other = int(open(lock).read().strip() or 0)
+    except (OSError, ValueError):
+        other = 0
+    if other and other != os.getpid():
+        try:
+            os.kill(other, 0); return False            # another sidebar is in charge
+        except OSError:
+            pass                                        # it's gone: take over
+    try:
+        open(lock, "w").write(str(os.getpid()))
+    except OSError:
+        return False
+    return True
+
+
+def sync_tabs():
+    """Close tabs of sessions that were ended anywhere; open tabs for saved sessions that started anywhere."""
+    global seen_running
+    with lock:
+        if not state["ok"]:
+            return
+        saved = {s["name"] for s in state["sessions"]}
+        running = {n for h in state["probe"].values() for n in h.get("sessions", {})} - {"coordinator"}
+        up = {h for h, d in state["probe"].items() if d.get("up")}
+        host_of = {s["name"]: s["host"] for s in state["sessions"]}
+        tablist = list(tabs["list"])
+    open_tabs = {t["name"] for t in tablist}
+    for t in tablist:
+        n = t["name"]
+        if n == "overview" or t["id"] is None:
+            continue
+        gone = n not in saved and n not in running
+        if gone:
+            run("zellij", "action", "close-tab-by-id", str(t["id"]), timeout=5)
+    now_running = {n for n in running if n in saved and host_of.get(n) in up}
+    if seen_running is not None:
+        for n in sorted(now_running - seen_running - open_tabs):   # newly started somewhere: give it a tab
+            subprocess.Popen([GWM, "open", n], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    seen_running = now_running
+
+
 def poller():
     n = 0
     while True:
         load_tabs()
         if n % 4 == 0:
             load_data()
+            if is_leader():
+                try:
+                    sync_tabs()
+                except Exception:
+                    pass
         n += 1
         time.sleep(1.5)
 
@@ -99,6 +158,8 @@ def session_state(s):
     with lock:
         hp = state["probe"].get(s["host"], {})
     if not hp.get("up"):
+        if "approval" in hp:
+            return "approval", YELLOW, "Tailscale SSH needs re-approval"
         return "offline", RED, ""
     info = hp["sessions"].get(s["name"])
     if not info:
@@ -170,16 +231,23 @@ def session_lines(add, sessions, host, active, num):
         if s["host"] != host:
             continue
         label, col, _ = session_state(s)
-        if label in ("off", "offline") and s["name"] not in num:
+        if label in ("off", "offline", "approval") and s["name"] not in num:
             hidden += 1                      # saved but not running: don't clutter the list
             continue
         is_active = active == s["name"]
-        off = label in ("off", "offline")
+        off = label in ("off", "offline", "approval")
         n = num.get(s["name"])
-        st = {"off": "○ off", "offline": "—"}.get(label, ("● " if label == "working" else "· ") + label)
+        st = {"off": "○ off", "offline": "—", "approval": "◐ approve"}.get(label, ("● " if label == "working" else "· ") + label)
         add([(1, "▌" if is_active else " ", "mark"),
              (3, f"{ICON.get(s['engine'], '·')} {s['name']}", "strong" if is_active else ("dim" if off else "normal")),
              (-4, st, col), (-1, str(n) if n and n < 10 else "", "dim")], ("tab", s["name"]))
+    with lock:
+        running = state["probe"].get(host, {}).get("sessions", {})
+    saved = {s["name"] for s in sessions}
+    for name in sorted(running):
+        if name in saved or name == "coordinator":
+            continue                         # running, but no saved entry: show it so it can be ended
+        add([(1, " ", "mark"), (3, f"· {name}", "dim"), (-4, "not saved", YELLOW)], ("orphan", name))
     if hidden:
         add([(3, f"{hidden} saved · not running", "dim")], ("act", "saved:" + host))
 
@@ -244,9 +312,13 @@ def build():
         for h in others:
             hp = probe.get(h["name"], {})
             up = hp.get("up")
+            ask = not up and "approval" in hp
             add()
-            add([(1, "●" if up else "○", "ok" if up else "bad"), (3, h["name"], "strong"),
-                 (-1, "" if up else "offline", "bad")])
+            add([(1, "●" if up else "◐" if ask else "○", "ok" if up else "warn" if ask else "bad"), (3, h["name"], "strong"),
+                 (-1, "" if up else "approval needed" if ask else "offline", "warn" if ask else "bad")])
+            if ask:                                 # Tailscale SSH "check": up, but the login waits for a browser approval
+                add([(3, "ssh there once, or open the", "dim")])
+                add([(3, "link in: gwm status", "dim")])
             if up:                                  # usage only for machines that are switched on
                 usage_rows(add, hp)
                 for name, sz in model_rows(hp.get("mlist") or []):
@@ -261,7 +333,7 @@ def build():
         add([(3, "no machines yet — gwm add", "dim")])
     add(); add()
     add([(1, "+  new session", "normal"), (-1, "n", "dim")], ("act", "new"))
-    add([(1, "×  close this session", "normal"), (-1, "x", "dim")], ("act", "close"))
+    add([(1, "×  end a session", "normal"), (-1, "x", "dim")], ("act", "close"))
     add([(1, "⟳  refresh", "normal"), (-1, "r", "dim")], ("act", "refresh"))
     return L
 
@@ -289,7 +361,7 @@ def details(target):
 def attr(key, sel=False):
     a = {"title": curses.color_pair(ACCENT) | curses.A_BOLD, "heading": curses.color_pair(GREY) | curses.A_BOLD,
          "strong": curses.A_BOLD, "normal": 0, "dim": curses.color_pair(GREY), "mark": curses.color_pair(BLUE) | curses.A_BOLD,
-         "ok": curses.color_pair(GREEN), "bad": curses.color_pair(RED), "used": curses.color_pair(MAGENTA)}.get(key)
+         "ok": curses.color_pair(GREEN), "bad": curses.color_pair(RED), "warn": curses.color_pair(YELLOW), "used": curses.color_pair(MAGENTA)}.get(key)
     if a is None:
         a = curses.color_pair(key) if isinstance(key, int) else 0
     return (curses.color_pair(SEL) | curses.A_BOLD) if sel else a
@@ -366,6 +438,9 @@ def activate(target):
     if not target:
         return
     kind, key = target
+    if kind == "orphan":
+        floating(["bash", "-c", 'echo "\"$1\" is still running, but it is not in your saved sessions, so it can'"'"'t be opened as a tab."; echo; "$0" close "$1"; echo; read -rsn1 -p "Press any key to close this window"', GWM, key], "end session")
+        return
     if kind == "tab":
         with lock:
             t = next((t for t in tabs["list"] if t["name"] == key), None)
@@ -378,11 +453,11 @@ def activate(target):
     elif kind == "act":
         if key == "new":
             floating(["bash", "-c", f'{GWM} new || {{ echo; read -rp "Press Enter to close "; }}'], "new session")
-        elif key == "close":
+        elif key == "close" or key.startswith("close:"):
             with lock:
-                cur = tabs["active"]
+                cur = key.split(":", 1)[1] if ":" in key else tabs["active"]
             if cur and cur != "overview":
-                floating(["bash", "-c", '"$0" close "$1"; sleep 1', GWM, cur], "close session")
+                floating(["bash", "-c", '"$0" close "$1"; echo; read -rsn1 -p "Press any key to close this window"', GWM, cur], "end session")
         elif key == "refresh":
             threading.Thread(target=load_data, daemon=True).start()
         elif key.startswith("saved:"):
@@ -443,7 +518,11 @@ def main(scr):
         elif ch == ord("n"):
             activate(("act", "new"))
         elif ch == ord("x"):
-            activate(("act", "close"))
+            row = L[cursor][1] if 0 <= cursor < len(L) else None
+            if row and row[0] in ("tab", "orphan") and row[1] != "overview":
+                activate(("act", "close:" + row[1])); cursor = -1     # end the highlighted session
+            else:
+                activate(("act", "close"))                            # or the tab you're in
         elif ch == ord("r"):
             activate(("act", "refresh"))
         elif ch == ord("?"):

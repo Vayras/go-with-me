@@ -11,6 +11,8 @@ import glob, json, os, re, subprocess, sys, time
 name, lines = sys.argv[1], int(sys.argv[2])
 fb_folder = os.path.expanduser(sys.argv[3] if len(sys.argv) > 3 else "~")
 fb_config = os.path.expanduser(sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else "~/.claude")
+explicit = os.path.expanduser(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else ""   # a saved conversation file
+locate = lines < 0                                                                          # -1: just say which conversation
 
 
 def sh(*a):
@@ -51,12 +53,29 @@ if live and not folder:
     folder = sh("tmux", "display", "-p", "-t", f"=gwm-{name}:", "#{pane_current_path}") or fb_folder
 slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(folder))
 files = sorted(glob.glob(os.path.join(config, "projects", slug, "*.jsonl")), key=os.path.getmtime, reverse=True)
+if locate and not live:
+    # claude isn't running in the session: only accept a conversation that was active while this session existed,
+    # never just "the newest one in the folder" (that may belong to another session)
+    created = sh("tmux", "display", "-p", "-t", f"=gwm-{name}:", "#{session_created}")
+    files = [f for f in files if created.isdigit() and os.path.getmtime(f) >= int(created)][:1]
+if explicit and os.path.isfile(explicit):
+    files = [explicit]
 if not files:
+    if locate:
+        print("{}"); sys.exit(0)
     print(f"[{name}] no Claude conversation found (folder {folder}, account dir {config})")
     sys.exit(0)
 
 path = files[0]
 title, msgs = "", []
+if locate:   # describe the conversation (for resuming later) without printing it
+    for raw in open(path, errors="replace"):
+        if '"ai-title"' in raw:
+            try: title = json.loads(raw).get("aiTitle") or title
+            except ValueError: pass
+    print(json.dumps({"transcript": path, "session_id": os.path.basename(path)[:-6], "folder": folder,
+                      "config": config, "title": title, "live": bool(live)}))
+    sys.exit(0)
 
 
 def clip(t, n=700):

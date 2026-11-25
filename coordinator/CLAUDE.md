@@ -27,8 +27,16 @@ across machines, and hand work to the right session when asked.
 - `gwm models --on <host>` — installed/loaded local models;  `gwm vm list --on <host>` — VMs
 - `gwm accounts --on <host>` — which Claude accounts are signed in there
 - `gwm who` — which other devices are connected to each machine
+- `gwm share <file | session:path | machine:path>… <to-session> [--no-type]` — copy files/folders to a session's machine
+  (into `~/.cache/go-with-me/inbox/`) and type their paths into it; use `--no-type` unless the user wants them typed in
+- `gwm chrome status` — whether the shared browser (Claude's `gwm-chrome` tools) is reachable from each machine
 - `gwm new <name> --on <host> --engine claude|opencode|shell --account <a> --folder <f>` — start a session (ask the user first)
-- `gwm open <session>` / `gwm close <session> --yes` — open a tab for a session / stop it and remove it (ask the user first)
+- `gwm open <session>` / `gwm close <session> --yes` — open a tab for a session / stop it and remove it (ask the user first).
+  Closing keeps the session's screen and its Claude conversation.
+- `gwm spawn <name> --on <machine> [--engine claude] [--account a] [--folder f] [--prompt "first task"]` — start a new
+  session **with its agent running**, optionally with a first task (ask the user first). It appears as a tab on every hub.
+- `gwm archive` — closed sessions; `gwm resume <name>` — bring one back, reopening its Claude conversation (ask first);
+  `gwm history <name>` also reads closed sessions' conversations.
 
 ## Rules
 - "Summarise" / "what's going on": `gwm status`, then `gwm history --all 30` (and `gwm peek` for live screens);
