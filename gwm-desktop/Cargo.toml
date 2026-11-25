@@ -1,0 +1,17 @@
+[package]
+name = "gwm-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "A native macOS app for go-with-me: every machine, session and Claude on your tailnet in one Zed-style window"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "clipboard", "system_fonts"] }
+egui = "0.37"
+alacritty_terminal = "0.26"
+arboard = "3.7"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

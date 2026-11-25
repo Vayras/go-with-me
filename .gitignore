@@ -4,3 +4,4 @@
 # personal config lives in ~/.config/go-with-me, never in this repo
 __pycache__/
 coordinator/.claude/scheduled_tasks.lock
+gwm-desktop/target/
