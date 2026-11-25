@@ -8,7 +8,7 @@ case "$n" in
     steps=("Read src/pages/index.tsx" "Read src/components/Hero.tsx" "Edit src/components/Hero.tsx  (+42 −9)" "Bash npm run build" "✓ build passed in 4.1s" "Edit src/styles/hero.css  (+18 −2)");;
   api-tests) eng="Claude Code · account: work · office-1"; title="Fixing flaky API tests"
     steps=("Bash pytest tests/api -x -q" "✗ 2 failed: test_orders_retry, test_refund_timeout" "Read app/payments/retry.py" "Edit app/payments/retry.py  (+11 −4)" "Bash pytest tests/api -q" "✓ 148 passed in 31.8s");;
-  local-refactor) eng="opencode · ollama/inkling-2-mini (local) · studio"; title="Refactor CLI arg parsing"
+  local-refactor) eng="opencode · omlx/inkling-2-mini (local) · studio"; title="Refactor CLI arg parsing"
     steps=("read cli/args.go" "edit cli/args.go  (+64 −71)" "bash go test ./cli/..." "✓ ok cli 0.41s");;
   load-test) eng="Claude Code · account: personal · sandbox (Linux VM)"; title="Load test finished"
     steps=("Bash k6 run load.js --vus 200" "p95 latency 182ms · 0.02% errors" "✓ Wrote report to reports/load-2026-11-24.md");;
