@@ -191,6 +191,8 @@ if [ "$(uname)" = Darwin ]; then
   # this machine own addresses, so connections from other machines can be named
   echo "I|$( { ifconfig 2>/dev/null | awk "/inet6? /{print \$2}"; tailscale ip 2>/dev/null; } | sed "s/%.*//; s/^fe80:[0-9a-f]*::/fe80::/" | grep -vE "^(127\.|::1\$|fe80::1\$)" | sort -u | paste -sd, -)"
 fi
+# this machine own sessions.conf, so a machine that missed a new session can pick it up: L|name|host|engine|account|folder
+[ -f ~/.config/go-with-me/sessions.conf ] && awk -F"|" "/^[[:space:]]*#/||NF<4{next} {o=\"L\"; for(i=1;i<=5;i++){v=\$i; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v); o=o \"|\" v} print o}" ~/.config/go-with-me/sessions.conf
 '
 demo_probe() {  # fake but lively data for `gwm demo`
   local t=$(( $(date +%s) / 5 )) r=$RANDOM
@@ -219,12 +221,27 @@ probe_all() {  # → "host|H|..." and "host|S|..." lines, all hosts in parallel
       for _ in $(seq 1 60); do kill -0 "$p" 2>/dev/null || break; grep -q "$TS_CHECK" "$e" 2>/dev/null && break; sleep 0.25; done
       kill -0 "$p" 2>/dev/null && { pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; }
       wait "$p" 2>/dev/null
-      out="$(grep -E '^[HSTCIM]\|' "$o")"
+      out="$(grep -E '^[HSTCIML]\|' "$o")"
       # A|<link>: the machine is up but Tailscale wants the login re-approved (open the link, or ssh there once).
       [ -z "$out" ] && grep -q "$TS_CHECK" "$e" 2>/dev/null && out="A|$(grep -o 'https://login.tailscale.com/[^[:space:]]*' "$e" | head -1)"
       [ -n "$out" ] || out="DOWN"; printf '%s\n' "$out" | sed "s/^/$h|/" > "$tmp/$h"; rm -f "$o" "$e" ) &
   done < <(hosts)
-  wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
+  wait; adopt_sessions "$tmp"; cat "$tmp"/* 2>/dev/null | grep -v '^[^|]*|L|'; rm -rf "$tmp"
+}
+adopt_sessions() {  # adopt_sessions <probe dir>: add sessions other machines host that are missing here
+  # (sync_session can't reach a machine that's asleep, so a session made then never reaches its sessions.conf)
+  local ph n h e a f
+  [ -f "$SESSIONS" ] || return 0
+  cat "$1"/* 2>/dev/null | grep '^[^|]*|L|' | while IFS='|' read -r ph _ n h e a f; do
+    [ "$ph" = "$h" ] || continue          # believe each machine only about the sessions it hosts
+    is_local "$h" && continue
+    [ -n "$f" ] || f="~"
+    [[ "$n" =~ $NAME_RE ]] && [ "$n" != coordinator ] && [[ "$h" =~ $NAME_RE ]] && [[ "$e" =~ $NAME_RE ]] \
+      && { [ "$a" = - ] || [[ "$a" =~ $NAME_RE ]]; } && [[ "$f" =~ $FOLDER_RE ]] || continue
+    hfield "$h" 1 >/dev/null 2>&1 || continue      # a machine this one knows
+    GWM_QUIET=1 sfield "$n" 1 >/dev/null 2>&1 && continue  # name already used here
+    printf '%s | %s | %s | %s | %s\n' "$n" "$h" "$e" "$a" "$f" >> "$SESSIONS"
+  done
 }
 ip_map() {  # "ip<TAB>hostname" for every SSH host, resolved from this machine (Bonjour .local names work)
   [ -n "${GWM_DEMO:-}" ] && { printf '10.0.0.3\tmacbook\n'; return; }
@@ -474,7 +491,7 @@ sync_session() {  # sync_session add <name> <line> | remove <name>: keep every m
       run_script "$h" "f=~/.config/go-with-me/sessions.conf; [ -f \$f ] || exit 0; awk -F'|' -v n='$n' '{v=\$1; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v)} v==n{f=1} END{exit !f}' \$f || printf %s $enc | base64 -d >> \$f" >/dev/null 2>&1
     else
       run_script "$h" "f=~/.config/go-with-me/sessions.conf; [ -f \$f ] || exit 0; awk -F'|' -v n='$n' '{v=\$1; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v)} v!=n' \$f > \$f.new && mv \$f.new \$f" >/dev/null 2>&1
-    fi || echo "$(c 33)•$(c 0) couldn't update '$h' (offline?) — it'll catch up next time you run gwm add or gwm sync there"
+    fi || echo "$(c 33)•$(c 0) couldn't update '$h' (offline?) — new sessions reach it automatically once it's back"
   done < <(hosts)
 }
 start_detached() {  # start_detached <name> <program…>: start a saved session in the background running a program
