@@ -42,7 +42,10 @@ def find_live():
             procs[p[0]] = (p[1], os.path.basename(p[2]), p[3] if len(p) > 3 else "")
     for pid, (ppid, comm, args) in procs.items():
         arg0 = args.split(None, 1)[0] if args else ""
-        if comm != "claude" and os.path.basename(arg0) != "claude" and "/claude/" not in arg0:
+        base0 = os.path.basename(arg0)
+        is_claude = (comm == "claude" or base0 == "claude" or "/claude/" in arg0
+                     or (base0 in ("node", "bun") and "claude" in args))
+        if not is_claude:
             continue
         q = ppid
         while q in procs and q != pane:
@@ -103,6 +106,8 @@ with open(path, errors="replace") as fh:
         parts = [c] if isinstance(c, str) else []
         if isinstance(c, list):
             for b in c:
+                if not isinstance(b, dict):
+                    continue
                 t = b.get("type")
                 if t == "text":
                     parts.append(b.get("text", ""))

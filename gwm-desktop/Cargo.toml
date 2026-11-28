@@ -1,6 +1,6 @@
 [package]
 name = "gwm-desktop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A native macOS app for go-with-me: every machine, session and Claude on your tailnet in one Zed-style window"
 license = "MIT"

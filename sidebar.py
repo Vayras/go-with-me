@@ -34,6 +34,16 @@ def run(*args, timeout=30):
 
 
 # ---------------------------------------------------------------- data
+def _int(v):
+    try: return int(v or 0)
+    except ValueError: return 0
+
+
+def _float(v):
+    try: return float(v)
+    except (TypeError, ValueError): return 0.0
+
+
 def load_data():
     out = run(GWM, "_data", timeout=45)
     hosts, sessions, used, probe, me, coord = [], [], {}, {}, "", ""
@@ -62,9 +72,8 @@ def load_data():
                 d["approval"] = p[2] if len(p) > 2 else ""
             elif kind == "M" and len(p) >= 4:
                 d.setdefault("mlist", []).append((p[2].replace(":latest", ""), p[3], p[4] if len(p) > 4 else ""))
-
             elif kind == "S" and len(p) >= 6:
-                d["sessions"][p[2]] = {"idle": int(p[3] or 0), "att": int(p[4] or 0), "title": p[5]}
+                d["sessions"][p[2]] = {"idle": _int(p[3]), "att": _int(p[4]), "title": p[5]}
     with lock:
         state.update(self=me, coord=coord, hosts=hosts, sessions=sessions, used=used, probe=probe, ok=bool(hosts))
 
@@ -100,14 +109,16 @@ def is_leader():
         return False
     if _leader_fd is not None:
         return True
+    fd = None
     try:
         fd = os.open(os.path.join(CFG, f".sidebar-leader-{HUB}"), os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         _leader_fd = fd
         return True
     except OSError:
-        try: os.close(fd)
-        except Exception: pass
+        if fd is not None:
+            try: os.close(fd)
+            except OSError: pass
         return False
 
 
@@ -169,9 +180,9 @@ def model_rows(mlist):
     """[(label, size)] biggest first; same-named models get their format (e.g. 'gguf') so they can be told apart."""
     names = [m[0] for m in mlist]
     out = []
-    for name, sz, fmt in sorted(mlist, key=lambda m: -float(m[1])):
+    for name, sz, fmt in sorted(mlist, key=lambda m: -_float(m[1])):
         fmt = {"safetensors": "mlx"}.get(fmt, fmt)
-        out.append((name + (f" ·{fmt}" if names.count(name) > 1 and fmt else ""), float(sz)))
+        out.append((name + (f" ·{fmt}" if names.count(name) > 1 and fmt else ""), _float(sz)))
     return out
 
 
@@ -268,7 +279,7 @@ def build():
             mlist = hp.get("mlist") or []
             add()
             if mlist:
-                total = sum(float(m[1]) for m in mlist)
+                total = sum(_float(m[1]) for m in mlist)
                 add([(3, f"models loaded · {len(mlist)}", "dim"), (-1, f"{total:.1f} GB", "dim")])
                 for name, sz in model_rows(mlist):
                     add([(5, name[:22], "normal"), (-1, f"{sz:.1f} GB", "dim")])

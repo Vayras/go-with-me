@@ -248,10 +248,10 @@ pub fn spawn_poller(tx: Sender<Msg>, ctx: egui::Context) -> Sender<()> {
                     let _ = tx.send(Msg::State(st));
                 }
             }
-            if n % 6 == 0 {
-                if let Ok(o) = command(&["_tailnet"]).stderr(Stdio::null()).output() {
-                    let _ = tx.send(Msg::Tailnet(parse_tailnet(&String::from_utf8_lossy(&o.stdout))));
-                }
+            if n.is_multiple_of(6)
+                && let Ok(o) = command(&["_tailnet"]).stderr(Stdio::null()).output()
+            {
+                let _ = tx.send(Msg::Tailnet(parse_tailnet(&String::from_utf8_lossy(&o.stdout))));
             }
             let _ = tx.send(Msg::Browser(browser_up()));
             ctx.request_repaint();

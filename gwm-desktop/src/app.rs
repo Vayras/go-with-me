@@ -109,6 +109,7 @@ pub struct App {
     poll_wake: Sender<()>,
     tabs: Vec<Tab>,
     active: usize,
+    scroll_active_tab: bool,
     sidebar: bool,
     collapsed: HashSet<String>,
     palette: Option<Palette>,
@@ -140,6 +141,7 @@ impl App {
             poll_wake,
             tabs: Vec::new(),
             active: 0,
+            scroll_active_tab: false,
             sidebar: true,
             collapsed: HashSet::new(),
             palette: None,
@@ -173,12 +175,14 @@ impl App {
     fn open_tab(&mut self, ctx: &egui::Context, key: &str) {
         if let Some(i) = self.tabs.iter().position(|t| t.key == key) {
             self.active = i;
+            self.scroll_active_tab = true;
             return;
         }
         let mut tab = Tab { key: key.to_owned(), term: None, error: None, pending: None };
         self.spawn_term(ctx, &mut tab);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.scroll_active_tab = true;
     }
 
     fn spawn_term(&self, ctx: &egui::Context, tab: &mut Tab) {
@@ -318,7 +322,10 @@ impl App {
         for a in std::mem::take(&mut self.actions) {
             match a {
                 Action::Open(k) => self.open_tab(ctx, &k),
-                Action::Activate(i) => self.active = i.min(self.tabs.len().saturating_sub(1)),
+                Action::Activate(i) => {
+                    self.active = i.min(self.tabs.len().saturating_sub(1));
+                    self.scroll_active_tab = true;
+                }
                 Action::Close(i) => {
                     if i < self.tabs.len() {
                         let tab = self.tabs.remove(i); // disconnects; the session keeps running on its machine
@@ -453,6 +460,7 @@ impl App {
         self.tabs.retain(|t| t.key != name);
         self.tabs.push(Tab { key: name, term: None, error: None, pending: Some(job) });
         self.active = self.tabs.len() - 1;
+        self.scroll_active_tab = true;
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -465,10 +473,10 @@ impl App {
             if i.consume_key(cmd, Key::T) || i.consume_key(cmd, Key::N) {
                 self.actions.push(Action::NewSession(None));
             }
-            if i.consume_key(cmd_shift, Key::W) {
-                if let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone()) {
-                    self.actions.push(Action::EndSession(k));
-                }
+            if i.consume_key(cmd_shift, Key::W)
+                && let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone())
+            {
+                self.actions.push(Action::EndSession(k));
             }
             if i.consume_key(cmd, Key::W) {
                 self.actions.push(Action::Close(self.active));
@@ -488,10 +496,10 @@ impl App {
             if i.consume_key(cmd_shift, Key::OpenBracket) && !self.tabs.is_empty() {
                 self.actions.push(Action::Activate((self.active + self.tabs.len() - 1) % self.tabs.len()));
             }
-            if let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone()) {
-                if i.consume_key(cmd_shift, Key::V) {
-                    self.actions.push(Action::PasteLast(k));
-                }
+            if let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone())
+                && i.consume_key(cmd_shift, Key::V)
+            {
+                self.actions.push(Action::PasteLast(k));
             }
             let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
             for (n, k) in nums.iter().enumerate() {
@@ -735,6 +743,10 @@ impl App {
                         let (r, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
                         let p = ui.painter();
                         let active = i == self.active;
+                        if active && self.scroll_active_tab {
+                            resp.scroll_to_me(None);
+                            self.scroll_active_tab = false;
+                        }
                         let bg = if active { theme::EDITOR } else if resp.hovered() { theme::HOVER } else { theme::PANEL };
                         p.rect_filled(r, 0.0, bg);
                         p.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, theme::BORDER_SOFT));
@@ -852,7 +864,7 @@ impl App {
                 m.request_focus(resp.id);
                 m.set_focus_lock_filter(
                     resp.id,
-                    egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true, ..Default::default() },
+                    egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
                 );
             });
         }
@@ -1279,10 +1291,10 @@ impl eframe::App for App {
             self.shortcuts(&ctx);
         }
         for a in &mut self.actions {
-            if let Action::Activate(i) = a {
-                if *i == usize::MAX {
-                    *i = self.tabs.len().saturating_sub(1); // ⌘9 = last tab
-                }
+            if let Action::Activate(i) = a
+                && *i == usize::MAX
+            {
+                *i = self.tabs.len().saturating_sub(1); // ⌘9 = last tab
             }
         }
         let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
