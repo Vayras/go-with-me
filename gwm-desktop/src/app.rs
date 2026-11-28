@@ -590,19 +590,21 @@ impl App {
                 _ => ("○", theme::FAINT),
             };
             let meta = if h.online == Some(true) {
-                [h.cpu.as_str(), h.ram.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ")
+                [h.cpu.as_str(), h.gpu.as_str(), h.ram.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ")
             } else if h.needs_approval {
                 "needs approval".into()
             } else {
                 "offline".into()
             };
             let tag = (h.name == self.state.me).then_some("this Mac");
-            let resp = group_header(ui, open, dot, dot_color, &h.name, count, &meta, tag).on_hover_text(format!(
-                "{}\n{}{}",
-                h.role,
-                h.target,
-                if h.used_by.is_empty() { String::new() } else { format!("\nalso used by {}", h.used_by) }
-            ));
+            let mut tip = format!("{}\n{}", h.role, h.target);
+            if !h.models.is_empty() {
+                tip.push_str(&format!("\nmodels: {}", h.models.join(", ")));
+            }
+            if !h.used_by.is_empty() {
+                tip.push_str(&format!("\nalso used by {}", h.used_by));
+            }
+            let resp = group_header(ui, open, dot, dot_color, &h.name, count, &meta, tag).on_hover_text(tip);
             if resp.clicked() {
                 if open {
                     self.collapsed.insert(h.name.clone());
@@ -1117,8 +1119,12 @@ impl App {
         let name_taken = self.state.sessions.iter().any(|s| s.name == name) || self.pending.iter().any(|p| p.form.name == name);
         let name_valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && name != COORD;
         let engine_valid = !d.engine.trim().is_empty() && d.engine.trim().chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+        let folder = d.folder.trim();
+        let folder_valid = !folder.is_empty() && folder.chars().all(|c| c.is_ascii_alphanumeric() || "_./~ -".contains(c));
+        let acct = d.account.trim();
+        let acct_valid = d.engine.trim() != "claude" || (!acct.is_empty() && acct.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)));
         let user_valid = peer.is_none() || !d.user.trim().is_empty();
-        let ok = name_valid && !name_taken && engine_valid && user_valid && !d.machine.is_empty();
+        let ok = name_valid && !name_taken && engine_valid && folder_valid && acct_valid && user_valid && !d.machine.is_empty();
         let width = 480.0;
         let modal = egui::Modal::new(egui::Id::NULL.with("gwm-new-session"))
             .frame(Frame::new().fill(theme::ELEVATED).stroke(Stroke::new(1.0, theme::BORDER)).corner_radius(CornerRadius::same(10)))
@@ -1214,9 +1220,17 @@ impl App {
                             }
                         });
                     }
-                    if name_taken || !name_valid {
+                    if name_taken || !name_valid || !folder_valid || !acct_valid {
                         ui.add_space(8.0);
-                        let msg = if name_taken { format!("'{name}' is already a session — pick another tab name under More options") } else { "Tab name: letters, digits, - and _ only".to_owned() };
+                        let msg = if name_taken {
+                            format!("'{name}' is already a session — pick another tab name under More options")
+                        } else if !name_valid {
+                            "Tab name: letters, digits, - and _ only".to_owned()
+                        } else if !folder_valid {
+                            "Start folder: letters, digits, spaces and _ . / ~ - only".to_owned()
+                        } else {
+                            "Claude account: letters, digits, _ . - only".to_owned()
+                        };
                         ui.label(RichText::new(msg).size(11.5).color(theme::RED));
                     }
                     if let Some(p) = &peer {

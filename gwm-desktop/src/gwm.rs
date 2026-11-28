@@ -266,7 +266,8 @@ pub fn spawn_poller(tx: Sender<Msg>, ctx: egui::Context) -> Sender<()> {
 
 /// Is the gwm shared Chrome (gwm chrome) open on this Mac?
 pub fn browser_up() -> bool {
-    std::net::TcpStream::connect_timeout(&"127.0.0.1:9339".parse().unwrap(), Duration::from_millis(150)).is_ok()
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 9339));
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
 }
 
 /// Run a gwm command in the background, streaming its output lines to the UI.

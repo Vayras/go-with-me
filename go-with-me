@@ -457,8 +457,9 @@ attach_loop() {
       echo "  $(c 1)Enter$(c 0)  bring it here — the other screen lets go"
       echo "  $(c 1)w$(c 0)      watch it here, read-only, without taking it"
       echo "  $(c 2)…or just wait: this tab connects by itself when the other screen lets go$(c 0)"
+      [ -t 0 ] || exit 0
       k=""; IFS= read -rsn1 -t 5 k; local rc=$?
-      if [ $rc -gt 128 ]; then continue; fi          # timed out: check again
+      if [ $rc -ne 0 ]; then continue; fi            # timed out (rc=1 on macOS bash 3.2, >128 on bash 4+): check again
       case "$k" in
         "") run_tty "$h" "$take" ;;
         w|W) clear; echo "Watching $label (read-only). Leave with ⌥X or by closing this tab."; run_tty "$h" "tmux attach-session -r -t '=$ts'" ;;
@@ -504,7 +505,7 @@ cmd_coordinator() {  # gwm coordinator [machine]: show or set where the shared c
 
 # ---------- hub (Zellij) ----------
 HUBNAME="${GWM_HUB:-gwm}"
-hub_running() { zellij list-sessions -n 2>/dev/null | grep -E "^$HUBNAME " | grep -vq EXITED; }
+hub_running() { zellij list-sessions -n 2>/dev/null | awk -v h="$HUBNAME" '$1==h && !/EXITED/{ok=1; exit} END{exit !ok}'; }
 tab_layout() {  # tab_layout <session>  → KDL for one session tab
   local n="$1" h e a; h="$(sfield "$n" 2)"; e="$(sfield "$n" 3)"; a="$(sfield "$n" 4)"
   local label="$n · $e on $h"; [ "$e" = claude ] && label="$label · account: $a"
@@ -515,7 +516,7 @@ bars() {  # every tab: the go-with-me sidebar on the left (the only navigation),
   printf '      pane size=34 borderless=true command="%s" { args "sidebar"; }\n      children\n    }\n  }\n' "$ME"
 }
 running_sessions() {  # names of configured sessions that are running right now on their machine
-  local data; data="$(probe_all)"
+  local data; data="$(probe_cached 3)"
   while IFS=$'\t' read -r n h _; do [ -n "$(probe_line "$h" S "$n" "$data")" ] && echo "$n"; done < <(sessions)
 }
 write_layout() {  # only sessions that are already running get a tab; others are opened with `gwm open <name>`
@@ -524,7 +525,7 @@ write_layout() {  # only sessions that are already running get a tab; others are
     printf '  tab name="1 overview" focus=true {\n'
     if [ -n "${GWM_DEMO:-}" ]; then printf '    pane focus=true command="bash" { args "%s"; }\n  }\n' "$DIR/demo/coordinator.sh"
     else printf '    pane focus=true command="%s" { args "attach-coordinator"; }\n  }\n' "$ME"; fi
-    for n in $(running_sessions); do i=$((i+1)); tab_layout "$n" | sed "1s/tab name=\"$n\"/tab name=\"$i $n\"/"; done
+    while IFS= read -r n; do [ -n "$n" ] || continue; i=$((i+1)); tab_layout "$n" | sed "1s/tab name=\"$n\"/tab name=\"$i $n\"/"; done < <(running_sessions)
     echo "}"; } > "$CFG/hub-layout.kdl"
 }
 cmd_open() {
@@ -584,8 +585,12 @@ start_detached() {  # start_detached <name> <program…>: start a saved session 
 cmd_spawn() {  # gwm spawn <name> --on <machine> [--engine e] [--account a] [--folder f] [--prompt "first task"]
   local n="" h="" e="claude" a="default" f="~" prompt=""
   while [ $# -gt 0 ]; do case "$1" in
-    --on) h="$2"; shift 2;; --engine) e="$2"; shift 2;; --account) a="$2"; shift 2;; --folder) f="$2"; shift 2;;
-    --prompt) prompt="$2"; shift 2;; *) n="$1"; shift;; esac; done
+    --on) [ $# -ge 2 ] || die "--on needs a machine"; h="$2"; shift 2;;
+    --engine) [ $# -ge 2 ] || die "--engine needs a value"; e="$2"; shift 2;;
+    --account) [ $# -ge 2 ] || die "--account needs a value"; a="$2"; shift 2;;
+    --folder) [ $# -ge 2 ] || die "--folder needs a value"; f="$2"; shift 2;;
+    --prompt) [ $# -ge 2 ] || die "--prompt needs a value"; prompt="$2"; shift 2;;
+    *) n="$1"; shift;; esac; done
   [ -n "$n" ] && [ -n "$h" ] || die "usage: gwm spawn <name> --on <machine> [--engine claude] [--account a] [--folder f] [--prompt \"task\"]"
   [ "$e" = claude ] || a="-"
   ensure_host "$h"; h="$ENSURED"
@@ -684,7 +689,11 @@ ask() {  # ask "Question" default  → reply (or default when not interactive)
 cmd_new() {
   local n="" h="" e="" a="" f="" u=""
   while [ $# -gt 0 ]; do case "$1" in
-    --on) h="$2"; shift 2;; --engine) e="$2"; shift 2;; --account) a="$2"; shift 2;; --folder) f="$2"; shift 2;; --user) u="$2"; shift 2;;
+    --on) [ $# -ge 2 ] || die "--on needs a machine"; h="$2"; shift 2;;
+    --engine) [ $# -ge 2 ] || die "--engine needs a value"; e="$2"; shift 2;;
+    --account) [ $# -ge 2 ] || die "--account needs a value"; a="$2"; shift 2;;
+    --folder) [ $# -ge 2 ] || die "--folder needs a value"; f="$2"; shift 2;;
+    --user) [ $# -ge 2 ] || die "--user needs a value"; u="$2"; shift 2;;
     *) n="$1"; shift;; esac; done
   echo "$(c 1)New session$(c 0) — a new tab running on one of your machines"
   if [ -z "$h" ]; then
@@ -1084,7 +1093,7 @@ d=\"\$i/$1\"; mkdir -p \"\$d\"; tar -xf - -C \"\$d\" || { rm -rf \"\$d\"; exit 1
 stamp() { echo "$(date +%Y%m%d-%H%M%S)-$RANDOM"; }
 send_local() {  # send_local <host> <path…>: copy files/folders from this machine into <host>'s inbox
   local h="$1" p args=(); shift
-  for p in "$@"; do p="$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"; args+=(-C "$(dirname "$p")" "./$(basename "$p")"); done
+  for p in "$@"; do p="$(cd "$(dirname -- "$p")" && pwd)/$(basename -- "$p")"; args+=(-C "$(dirname -- "$p")" "./$(basename -- "$p")"); done
   ( set -o pipefail; COPYFILE_DISABLE=1 tar -cf - "${args[@]}" | pipe_host "$h" "$(recv_script "$(stamp)")" )
 }
 send_remote() {  # send_remote <from-host> <from-folder> <path> <to-host>: copy a file/folder between two machines
@@ -1093,8 +1102,8 @@ send_remote() {  # send_remote <from-host> <from-folder> <path> <to-host>: copy 
     pipe_host "$src" "cd $(qfolder "$folder") 2>/dev/null || cd; p=\"\$(printf %s $(b64 "$p") | base64 -d)\"
 case \"\$p\" in '~') p=\"\$HOME\";; '~/'*) p=\"\$HOME/\${p#??}\";; esac
 [ -e \"\$p\" ] || { echo \"go-with-me: no such file on $src: \$p\" >&2; exit 1; }
-p=\"\$(cd \"\$(dirname \"\$p\")\" && pwd)/\$(basename \"\$p\")\"
-COPYFILE_DISABLE=1 tar -cf - -C \"\$(dirname \"\$p\")\" \"./\$(basename \"\$p\")\"" | pipe_host "$dst" "$(recv_script "$(stamp)")" )
+p=\"\$(cd \"\$(dirname -- \"\$p\")\" && pwd)/\$(basename -- \"\$p\")\"
+COPYFILE_DISABLE=1 tar -cf - -C \"\$(dirname -- \"\$p\")\" \"./\$(basename -- \"\$p\")\"" | pipe_host "$dst" "$(recv_script "$(stamp)")" )
 }
 target_session() {  # target_session [name] → "name<TAB>host<TAB>tmux-session"; no name = the hub tab you're looking at
   local n="${1:-}"
@@ -1248,13 +1257,15 @@ cmd_chrome() {  # gwm chrome [start|stop|status] [--to machine]…
     start)
       chrome_start
       echo "$(c 32)✓$(c 0) The go-with-me browser is open on this Mac (its own Chrome window and profile)."
+      local tmp i=0; tmp="$(mktemp -d)"
       for h in $(chrome_hosts ${to[@]+"${to[@]}"}); do
-        echo "$(c 1)$h$(c 0)$(is_local "$h" && echo ' (here)')"
         if ! is_local "$h" && [ -z "$(tunnel_pid "$h")" ]; then
           nohup "$ME" _chrome-tunnel "$h" >"$CHROME_DIR/tunnel-$h.log" 2>&1 </dev/null & echo $! > "$CHROME_DIR/tunnel-$h.pid"
         fi
-        chrome_mcp_add "$h"
+        i=$((i+1))
+        ( { echo "$(c 1)$h$(c 0)$(is_local "$h" && echo ' (here)')"; chrome_mcp_add "$h"; } > "$tmp/$(printf '%04d' "$i")" ) &
       done
+      wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
       echo
       echo "Claude sessions use it through the $(c 1)$CHROME_MCP$(c 0) tools — just ask Claude to open a page. Check: gwm chrome status"
       echo "$(c 2)It stays shared until you quit that Chrome window or run gwm chrome stop. One Mac at a time can share its browser to a machine.$(c 0)" ;;
@@ -1264,12 +1275,15 @@ cmd_chrome() {  # gwm chrome [start|stop|status] [--to machine]…
       echo "$(c 32)✓$(c 0) Closed the go-with-me browser and stopped sharing it (its profile and sign-ins stay in $CHROME_DIR)." ;;
     status)
       if chrome_up; then echo "Browser: $(c 32)● open$(c 0) on this Mac (port $CHROME_PORT)"; else echo "Browser: $(c 2)○ not open here$(c 0) → gwm chrome"; fi
+      local tmp i=0; tmp="$(mktemp -d)"
       for h in $(chrome_hosts ${to[@]+"${to[@]}"}); do
-        r="$(run_script "$h" "curl -s -m 2 http://127.0.0.1:$CHROME_PORT/json/version >/dev/null 2>&1 && echo GWM_REACH; command -v claude >/dev/null && claude mcp get $CHROME_MCP >/dev/null 2>&1 && echo GWM_MCP" 2>/dev/null)"
-        printf '  %-12s %s · %s\n' "$h" \
-          "$(grep -q GWM_REACH <<<"$r" && echo "$(c 32)reaches a browser$(c 0)" || echo "$(c 31)no browser$(c 0)")" \
-          "$(grep -q GWM_MCP <<<"$r" && echo "tools added" || echo "tools not added (default account) → gwm chrome")"
-      done ;;
+        i=$((i+1))
+        ( r="$(run_script "$h" "curl -s -m 2 http://127.0.0.1:$CHROME_PORT/json/version >/dev/null 2>&1 && echo GWM_REACH; command -v claude >/dev/null && claude mcp get $CHROME_MCP >/dev/null 2>&1 && echo GWM_MCP" 2>/dev/null)"
+          printf '  %-12s %s · %s\n' "$h" \
+            "$(grep -q GWM_REACH <<<"$r" && echo "$(c 32)reaches a browser$(c 0)" || echo "$(c 31)no browser$(c 0)")" \
+            "$(grep -q GWM_MCP <<<"$r" && echo "tools added" || echo "tools not added (default account) → gwm chrome")" > "$tmp/$(printf '%04d' "$i")" ) &
+      done
+      wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp" ;;
   esac
 }
 
@@ -1313,9 +1327,13 @@ cmd_web() {
     # 2. the local web server — loopback only
     if ! web_online; then
       zellij --config "$DIR/hub.zellij.kdl" web --daemonize >/dev/null 2>&1 || die "couldn't start the web server"
-      sleep 1
     fi
-    local binds; binds="$(lsof -nP -iTCP:$WEB_PORT -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}')"
+    local binds="" _i
+    for _i in $(seq 1 30); do
+      binds="$(lsof -nP -iTCP:$WEB_PORT -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}')"
+      [ -n "$binds" ] && break
+      sleep 0.1
+    done
     if [ -z "$binds" ]; then
       zellij --config "$DIR/hub.zellij.kdl" web --stop >/dev/null 2>&1; die "the web server didn't come up on 127.0.0.1:$WEB_PORT"
     fi
@@ -1379,8 +1397,11 @@ for p in (d.get("Peer") or {}).values():
 cmd_add() {
   local n="" addr="" user="" role="" yes="" via=""
   while [ $# -gt 0 ]; do case "$1" in
-    --address) addr="$2"; shift 2;; --user) user="$2"; shift 2;; --role) role="$2"; shift 2;; -y|--yes) yes=1; shift;;
-    --via) via="$2"; shift 2;;
+    --address) [ $# -ge 2 ] || die "--address needs a value"; addr="$2"; shift 2;;
+    --user) [ $# -ge 2 ] || die "--user needs a value"; user="$2"; shift 2;;
+    --role) [ $# -ge 2 ] || die "--role needs a value"; role="$2"; shift 2;;
+    -y|--yes) yes=1; shift;;
+    --via) [ $# -ge 2 ] || die "--via needs tailscale or ssh"; via="$2"; shift 2;;
     *) n="$1"; shift;; esac; done
   [ -n "$(self_name)" ] || die "run 'gwm init' on this machine first"
   local me mytarget; me="$(self_name)"; mytarget="$(hfield "$me" 2)"
