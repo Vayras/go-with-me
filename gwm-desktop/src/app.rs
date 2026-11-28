@@ -106,8 +106,10 @@ pub struct App {
     browser_pending: Option<bool>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+    poll_wake: Sender<()>,
     tabs: Vec<Tab>,
     active: usize,
+    scroll_active_tab: bool,
     sidebar: bool,
     collapsed: HashSet<String>,
     palette: Option<Palette>,
@@ -128,7 +130,7 @@ pub struct App {
 impl App {
     pub fn new(ctx: &egui::Context, open: Vec<String>, screenshot: Option<PathBuf>, show: Option<String>) -> Self {
         let (tx, rx) = channel();
-        gwm::spawn_poller(tx.clone(), ctx.clone());
+        let poll_wake = gwm::spawn_poller(tx.clone(), ctx.clone());
         let mut app = Self {
             state: State::default(),
             peers: Vec::new(),
@@ -136,8 +138,10 @@ impl App {
             browser_pending: None,
             tx,
             rx,
+            poll_wake,
             tabs: Vec::new(),
             active: 0,
+            scroll_active_tab: false,
             sidebar: true,
             collapsed: HashSet::new(),
             palette: None,
@@ -171,12 +175,14 @@ impl App {
     fn open_tab(&mut self, ctx: &egui::Context, key: &str) {
         if let Some(i) = self.tabs.iter().position(|t| t.key == key) {
             self.active = i;
+            self.scroll_active_tab = true;
             return;
         }
         let mut tab = Tab { key: key.to_owned(), term: None, error: None, pending: None };
         self.spawn_term(ctx, &mut tab);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.scroll_active_tab = true;
     }
 
     fn spawn_term(&self, ctx: &egui::Context, tab: &mut Tab) {
@@ -236,15 +242,8 @@ impl App {
         self.toasts.push(Toast { text: text.into(), ok, at: Instant::now() });
     }
 
-    fn refresh_now(&self, ctx: &egui::Context) {
-        let tx = self.tx.clone();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            if let Ok(o) = gwm::command(&["_data"]).stderr(std::process::Stdio::null()).output() {
-                let _ = tx.send(Msg::State(gwm::parse_data(&String::from_utf8_lossy(&o.stdout))));
-                ctx.request_repaint();
-            }
-        });
+    fn refresh_now(&self) {
+        let _ = self.poll_wake.send(());
     }
 
     fn handle_messages(&mut self, ctx: &egui::Context) {
@@ -271,7 +270,7 @@ impl App {
                             let name = name.clone();
                             if ok {
                                 self.pending.retain(|p| p.job != id);
-                                self.refresh_now(ctx);
+                                self.refresh_now();
                                 // settle the optimistic tab into a live terminal
                                 if let Some(i) = self.tabs.iter().position(|t| t.key == name) {
                                     let mut tab = self.tabs.remove(i);
@@ -290,7 +289,7 @@ impl App {
                         JobKind::EndSession(name) => {
                             let name = name.clone();
                             self.ending.remove(&name);
-                            self.refresh_now(ctx);
+                            self.refresh_now();
                             if ok {
                                 self.toast(format!("Ended '{name}' (its screen is in the archive)"), true);
                             } else {
@@ -312,6 +311,9 @@ impl App {
                 }
             }
         }
+        // Drop completed jobs that aren't attached to a pending/failed tab so memory stays bounded.
+        let tabs = &self.tabs;
+        self.jobs.retain(|id, j| j.done.is_none() || tabs.iter().any(|t| t.pending == Some(*id)));
         self.toasts.retain(|t| t.at.elapsed() < Duration::from_secs(6));
     }
 
@@ -320,7 +322,10 @@ impl App {
         for a in std::mem::take(&mut self.actions) {
             match a {
                 Action::Open(k) => self.open_tab(ctx, &k),
-                Action::Activate(i) => self.active = i.min(self.tabs.len().saturating_sub(1)),
+                Action::Activate(i) => {
+                    self.active = i.min(self.tabs.len().saturating_sub(1));
+                    self.scroll_active_tab = true;
+                }
                 Action::Close(i) => {
                     if i < self.tabs.len() {
                         let tab = self.tabs.remove(i); // disconnects; the session keeps running on its machine
@@ -455,6 +460,7 @@ impl App {
         self.tabs.retain(|t| t.key != name);
         self.tabs.push(Tab { key: name, term: None, error: None, pending: Some(job) });
         self.active = self.tabs.len() - 1;
+        self.scroll_active_tab = true;
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -467,10 +473,10 @@ impl App {
             if i.consume_key(cmd, Key::T) || i.consume_key(cmd, Key::N) {
                 self.actions.push(Action::NewSession(None));
             }
-            if i.consume_key(cmd_shift, Key::W) {
-                if let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone()) {
-                    self.actions.push(Action::EndSession(k));
-                }
+            if i.consume_key(cmd_shift, Key::W)
+                && let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone())
+            {
+                self.actions.push(Action::EndSession(k));
             }
             if i.consume_key(cmd, Key::W) {
                 self.actions.push(Action::Close(self.active));
@@ -490,10 +496,10 @@ impl App {
             if i.consume_key(cmd_shift, Key::OpenBracket) && !self.tabs.is_empty() {
                 self.actions.push(Action::Activate((self.active + self.tabs.len() - 1) % self.tabs.len()));
             }
-            if let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone()) {
-                if i.consume_key(cmd_shift, Key::V) {
-                    self.actions.push(Action::PasteLast(k));
-                }
+            if let Some(k) = self.tabs.get(self.active).map(|t| t.key.clone())
+                && i.consume_key(cmd_shift, Key::V)
+            {
+                self.actions.push(Action::PasteLast(k));
             }
             let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
             for (n, k) in nums.iter().enumerate() {
@@ -584,19 +590,21 @@ impl App {
                 _ => ("○", theme::FAINT),
             };
             let meta = if h.online == Some(true) {
-                [h.cpu.as_str(), h.ram.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ")
+                [h.cpu.as_str(), h.gpu.as_str(), h.ram.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ")
             } else if h.needs_approval {
                 "needs approval".into()
             } else {
                 "offline".into()
             };
             let tag = (h.name == self.state.me).then_some("this Mac");
-            let resp = group_header(ui, open, dot, dot_color, &h.name, count, &meta, tag).on_hover_text(format!(
-                "{}\n{}{}",
-                h.role,
-                h.target,
-                if h.used_by.is_empty() { String::new() } else { format!("\nalso used by {}", h.used_by) }
-            ));
+            let mut tip = format!("{}\n{}", h.role, h.target);
+            if !h.models.is_empty() {
+                tip.push_str(&format!("\nmodels: {}", h.models.join(", ")));
+            }
+            if !h.used_by.is_empty() {
+                tip.push_str(&format!("\nalso used by {}", h.used_by));
+            }
+            let resp = group_header(ui, open, dot, dot_color, &h.name, count, &meta, tag).on_hover_text(tip);
             if resp.clicked() {
                 if open {
                     self.collapsed.insert(h.name.clone());
@@ -718,72 +726,82 @@ impl App {
     // ---------- tab bar ----------
     fn tab_bar(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
-        let p = ui.painter().clone();
-        p.rect_filled(rect, 0.0, theme::PANEL);
-        p.line_segment([rect.left_bottom() - vec2(0.0, 0.5), rect.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, theme::BORDER_SOFT));
-        let mut x = rect.left();
+        let h = rect.height();
+        ui.painter().rect_filled(rect, 0.0, theme::PANEL);
+        ui.painter().line_segment([rect.left_bottom() - vec2(0.0, 0.5), rect.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, theme::BORDER_SOFT));
         let font = FontId::proportional(12.5);
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let label = self.label_of(&tab.key);
-            let host = self.host_of(&tab.key);
-            let text_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::TEXT).size().x);
-            let host_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(host.clone(), FontId::proportional(11.0), theme::FAINT).size().x);
-            let w = (text_w + host_w + 72.0).clamp(110.0, 280.0);
-            let r = Rect::from_min_size(pos2(x, rect.top()), vec2(w, rect.height()));
-            let resp = ui.interact(r, ui.scope_id().with(("tab", &tab.key)), Sense::click());
-            let active = i == self.active;
-            let bg = if active { theme::EDITOR } else if resp.hovered() { theme::HOVER } else { theme::PANEL };
-            p.rect_filled(r, 0.0, bg);
-            p.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, theme::BORDER_SOFT));
-            if !active {
-                p.line_segment([r.left_bottom() - vec2(0.0, 0.5), r.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, theme::BORDER_SOFT));
-            }
-            let failed = self.pending.iter().any(|pd| pd.form.name == tab.key && pd.failed);
-            let icon_r = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(11.0, 11.0));
-            if tab.pending.is_some() && !failed {
-                egui::Spinner::new().size(11.0).color(theme::ACCENT).paint_at(ui, icon_r);
-            } else {
-                let c = if failed { theme::RED } else if tab.term.as_ref().is_some_and(|t| t.exited) { theme::FAINT } else { theme::ACCENT };
-                p.text(icon_r.center(), Align2::CENTER_CENTER, self.icon_of(&tab.key), theme::mono(12.0), c);
-            }
-            p.text(pos2(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, &label, font.clone(), if active { theme::TEXT } else { theme::MUTED });
-            p.text(pos2(r.left() + 34.0 + text_w, r.center().y + 0.5), Align2::LEFT_CENTER, &host, FontId::proportional(11.0), theme::FAINT);
-            let close = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(16.0, 16.0));
-            let close_resp = ui.interact(close, ui.scope_id().with(("close", &tab.key)), Sense::click());
-            if active || resp.hovered() || close_resp.hovered() {
-                if close_resp.hovered() {
-                    p.rect_filled(close, 3.0, theme::SELECTED);
-                }
-                p.text(close.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), theme::MUTED);
-            }
-            if close_resp.clicked() || resp.middle_clicked() {
-                self.actions.push(Action::Close(i));
-            } else if resp.clicked() {
-                self.actions.push(Action::Activate(i));
-            }
-            let _ = close_resp.on_hover_text("Close tab (the session keeps running)");
-            let key = tab.key.clone();
-            resp.context_menu(|ui| {
-                if ui.button("Close tab").clicked() {
-                    self.actions.push(Action::Close(i));
-                    ui.close();
-                }
-                if key != COORD && tab.pending.is_none() && ui.button(RichText::new("End session…").color(theme::RED)).clicked() {
-                    self.actions.push(Action::EndSession(key.clone()));
-                    ui.close();
-                }
+        egui::ScrollArea::horizontal()
+            .id_salt("gwm-tabs")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                ui.horizontal(|ui| {
+                    for (i, tab) in self.tabs.iter().enumerate() {
+                        let label = self.label_of(&tab.key);
+                        let host = self.host_of(&tab.key);
+                        let text_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::TEXT).size().x);
+                        let host_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(host.clone(), FontId::proportional(11.0), theme::FAINT).size().x);
+                        let w = (text_w + host_w + 72.0).clamp(110.0, 280.0);
+                        let (r, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+                        let p = ui.painter();
+                        let active = i == self.active;
+                        if active && self.scroll_active_tab {
+                            resp.scroll_to_me(None);
+                            self.scroll_active_tab = false;
+                        }
+                        let bg = if active { theme::EDITOR } else if resp.hovered() { theme::HOVER } else { theme::PANEL };
+                        p.rect_filled(r, 0.0, bg);
+                        p.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, theme::BORDER_SOFT));
+                        if !active {
+                            p.line_segment([r.left_bottom() - vec2(0.0, 0.5), r.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, theme::BORDER_SOFT));
+                        }
+                        let failed = self.pending.iter().any(|pd| pd.form.name == tab.key && pd.failed);
+                        let icon_r = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(11.0, 11.0));
+                        if tab.pending.is_some() && !failed {
+                            egui::Spinner::new().size(11.0).color(theme::ACCENT).paint_at(ui, icon_r);
+                        } else {
+                            let c = if failed { theme::RED } else if tab.term.as_ref().is_some_and(|t| t.exited) { theme::FAINT } else { theme::ACCENT };
+                            p.text(icon_r.center(), Align2::CENTER_CENTER, self.icon_of(&tab.key), theme::mono(12.0), c);
+                        }
+                        p.text(pos2(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, &label, font.clone(), if active { theme::TEXT } else { theme::MUTED });
+                        p.text(pos2(r.left() + 34.0 + text_w, r.center().y + 0.5), Align2::LEFT_CENTER, &host, FontId::proportional(11.0), theme::FAINT);
+                        let close = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(16.0, 16.0));
+                        let close_resp = ui.interact(close, ui.scope_id().with(("close", &tab.key)), Sense::click());
+                        if active || resp.hovered() || close_resp.hovered() {
+                            if close_resp.hovered() {
+                                p.rect_filled(close, 3.0, theme::SELECTED);
+                            }
+                            p.text(close.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), theme::MUTED);
+                        }
+                        if close_resp.clicked() || resp.middle_clicked() {
+                            self.actions.push(Action::Close(i));
+                        } else if resp.clicked() {
+                            self.actions.push(Action::Activate(i));
+                        }
+                        let _ = close_resp.on_hover_text("Close tab (the session keeps running)");
+                        let key = tab.key.clone();
+                        resp.context_menu(|ui| {
+                            if ui.button("Close tab").clicked() {
+                                self.actions.push(Action::Close(i));
+                                ui.close();
+                            }
+                            if key != COORD && tab.pending.is_none() && ui.button(RichText::new("End session…").color(theme::RED)).clicked() {
+                                self.actions.push(Action::EndSession(key.clone()));
+                                ui.close();
+                            }
+                        });
+                    }
+                    let (plus, pr) = ui.allocate_exact_size(vec2(34.0, h), Sense::click());
+                    let pr = pr.on_hover_text("New session (⌘T)");
+                    if pr.hovered() {
+                        ui.painter().rect_filled(plus.shrink(5.0), 4.0, theme::HOVER);
+                    }
+                    ui.painter().text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(16.0), theme::MUTED);
+                    if pr.clicked() {
+                        self.actions.push(Action::NewSession(None));
+                    }
+                });
             });
-            x += w;
-        }
-        let plus = Rect::from_min_size(pos2(x, rect.top()), vec2(34.0, rect.height()));
-        let pr = ui.interact(plus, ui.scope_id().with("plus"), Sense::click()).on_hover_text("New session (⌘T)");
-        if pr.hovered() {
-            p.rect_filled(plus.shrink(5.0), 4.0, theme::HOVER);
-        }
-        p.text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(16.0), theme::MUTED);
-        if pr.clicked() {
-            self.actions.push(Action::NewSession(None));
-        }
     }
 
     // ---------- status bar: machines (left) · what's happening (middle) · help (right) ----------
@@ -848,7 +866,7 @@ impl App {
                 m.request_focus(resp.id);
                 m.set_focus_lock_filter(
                     resp.id,
-                    egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true, ..Default::default() },
+                    egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
                 );
             });
         }
@@ -1101,8 +1119,12 @@ impl App {
         let name_taken = self.state.sessions.iter().any(|s| s.name == name) || self.pending.iter().any(|p| p.form.name == name);
         let name_valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && name != COORD;
         let engine_valid = !d.engine.trim().is_empty() && d.engine.trim().chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+        let folder = d.folder.trim();
+        let folder_valid = !folder.is_empty() && folder.chars().all(|c| c.is_ascii_alphanumeric() || "_./~ -".contains(c));
+        let acct = d.account.trim();
+        let acct_valid = d.engine.trim() != "claude" || (!acct.is_empty() && acct.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)));
         let user_valid = peer.is_none() || !d.user.trim().is_empty();
-        let ok = name_valid && !name_taken && engine_valid && user_valid && !d.machine.is_empty();
+        let ok = name_valid && !name_taken && engine_valid && folder_valid && acct_valid && user_valid && !d.machine.is_empty();
         let width = 480.0;
         let modal = egui::Modal::new(egui::Id::NULL.with("gwm-new-session"))
             .frame(Frame::new().fill(theme::ELEVATED).stroke(Stroke::new(1.0, theme::BORDER)).corner_radius(CornerRadius::same(10)))
@@ -1198,9 +1220,17 @@ impl App {
                             }
                         });
                     }
-                    if name_taken || !name_valid {
+                    if name_taken || !name_valid || !folder_valid || !acct_valid {
                         ui.add_space(8.0);
-                        let msg = if name_taken { format!("'{name}' is already a session — pick another tab name under More options") } else { "Tab name: letters, digits, - and _ only".to_owned() };
+                        let msg = if name_taken {
+                            format!("'{name}' is already a session — pick another tab name under More options")
+                        } else if !name_valid {
+                            "Tab name: letters, digits, - and _ only".to_owned()
+                        } else if !folder_valid {
+                            "Start folder: letters, digits, spaces and _ . / ~ - only".to_owned()
+                        } else {
+                            "Claude account: letters, digits, _ . - only".to_owned()
+                        };
                         ui.label(RichText::new(msg).size(11.5).color(theme::RED));
                     }
                     if let Some(p) = &peer {
@@ -1275,10 +1305,10 @@ impl eframe::App for App {
             self.shortcuts(&ctx);
         }
         for a in &mut self.actions {
-            if let Action::Activate(i) = a {
-                if *i == usize::MAX {
-                    *i = self.tabs.len().saturating_sub(1); // ⌘9 = last tab
-                }
+            if let Action::Activate(i) = a
+                && *i == usize::MAX
+            {
+                *i = self.tabs.len().saturating_sub(1); // ⌘9 = last tab
             }
         }
         let window_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));

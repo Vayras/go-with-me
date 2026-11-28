@@ -64,6 +64,7 @@ pub struct Terminal {
     events: mpsc::Receiver<TermEvent>,
     cols: usize,
     lines: usize,
+    last_cell: Vec2,
     pub font_size: f32,
     pub title: Option<String>,
     pub exited: bool,
@@ -103,6 +104,7 @@ impl Terminal {
             events: rx,
             cols,
             lines,
+            last_cell: vec2(8.0, 16.0),
             font_size: 13.0,
             title: None,
             exited: false,
@@ -152,7 +154,7 @@ impl Terminal {
                     let c = self.palette_color(i);
                     self.write(f(Rgb { r: c.r(), g: c.g(), b: c.b() }));
                 }
-                TermEvent::TextAreaSizeRequest(f) => self.write(f(self.window_size(vec2(8.0, 16.0)))),
+                TermEvent::TextAreaSizeRequest(f) => self.write(f(self.window_size(self.last_cell))),
                 TermEvent::ChildExit(_) | TermEvent::Exit => self.exited = true,
                 _ => {}
             }
@@ -185,6 +187,7 @@ impl Terminal {
         let font = theme::mono(self.font_size);
         let (cw, ch) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font).ceil()));
         let cell = vec2(cw, ch);
+        self.last_cell = cell;
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let pad = vec2(10.0, 6.0);
         let origin = rect.min + pad;
@@ -293,7 +296,9 @@ impl Terminal {
         } else if let Some(pos) = resp.interact_pointer_pos() {
             let (p, side) = self.cell_at(pos, origin, cell, offset);
             let mut t = self.term.lock();
-            if resp.double_clicked() {
+            if resp.triple_clicked() {
+                t.selection = Some(Selection::new(SelectionType::Lines, p, side));
+            } else if resp.double_clicked() {
                 t.selection = Some(Selection::new(SelectionType::Semantic, p, side));
             } else if resp.drag_started() {
                 t.selection = Some(Selection::new(SelectionType::Simple, p, side));
@@ -359,7 +364,7 @@ impl Terminal {
                 if !trimmed.is_empty() {
                     painter.text(pos2(r.x, r.y), Align2::LEFT_TOP, trimmed, font.clone(), r.fg);
                 }
-                let w = r.text.chars().count() as f32 * cell.x;
+                let w = r.text.len() as f32 * cell.x; // ASCII-only run
                 if r.underline {
                     painter.line_segment([pos2(r.x, r.y + cell.y - 1.5), pos2(r.x + w, r.y + cell.y - 1.5)], Stroke::new(1.0, r.fg));
                 }
@@ -422,6 +427,9 @@ impl Terminal {
                 painter.text(pos2(x + cell.x * width / 2.0, y + cell.y / 2.0), Align2::CENTER_CENTER, s, font.clone(), fg);
                 if underline {
                     painter.line_segment([pos2(x, y + cell.y - 1.5), pos2(x + cell.x * width, y + cell.y - 1.5)], Stroke::new(1.0, fg));
+                }
+                if strike {
+                    painter.line_segment([pos2(x, y + cell.y / 2.0), pos2(x + cell.x * width, y + cell.y / 2.0)], Stroke::new(1.0, fg));
                 }
             }
         }

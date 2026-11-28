@@ -188,7 +188,7 @@ The pieces of go-with-me exist elsewhere; the combination is what's different. W
 
 **go-with-me's angle:** a *machine-level* board (resources, local models, VMs, who's connected), **per-session Claude accounts** mixed across machines, **local models and Lima VMs as first-class citizens**, and a coordinator that works over your own SSH. It's all in the terminal and simple enough to read in one sitting.
 
-**Not there yet:** phone and web access, "needs your input" alerts, git worktree isolation, cost tracking, and restoring layouts after a reboot. PRs welcome.
+**Not there yet:** "needs your input" alerts, git worktree isolation, cost tracking, and restoring layouts after a reboot. PRs welcome.
 
 ## Security notes
 

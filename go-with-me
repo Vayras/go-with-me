@@ -67,6 +67,7 @@ ME="$DIR/go-with-me"
 CFG="${GWM_CONFIG:-$HOME/.config/go-with-me}"
 if [ "${1:-}" = demo ]; then   # `gwm demo`: the real hub with pretend machines — no SSH, no logins, nothing real touched
   export GWM_DEMO=1 GWM_HUB=gwm-demo GWM_CONFIG="$(mktemp -d "${TMPDIR:-/tmp}/go-with-me-demo.XXXXXX")"
+  trap 'rm -rf "$GWM_CONFIG"' EXIT
   cp "$DIR/demo/hosts.conf" "$DIR/demo/sessions.conf" "$GWM_CONFIG/"; echo studio > "$GWM_CONFIG/self"
   CFG="$GWM_CONFIG"; shift; [ $# -gt 0 ] || set -- open   # `gwm demo status` etc. also work on the pretend data
 fi
@@ -81,61 +82,107 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 self_name() { [ -f "$SELF_FILE" ] && cat "$SELF_FILE" || true; }
 
 # ---------- config ----------
-rows() {  # rows <file> <ncols>  → tab-separated, trimmed, comments skipped
-  [ -f "$1" ] || die "missing $1 — run: gwm init <this-host-name>"
-  awk -F'|' -v n="$2" '/^[[:space:]]*#/||/^[[:space:]]*$/{next}
-    {o=""; for(i=1;i<=n;i++){v=$i; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); o=o (i>1?"\t":"") v} print o}' "$1"
-}
 # Config values end up inside commands on other machines, so only safe characters are accepted.
-NAME_RE='^[A-Za-z0-9_.-]+$'; FOLDER_RE='^[A-Za-z0-9_./~ -]+$'; TARGET_RE='^([A-Za-z0-9_.-]+@)?[A-Za-z0-9_.:-]+$|^vm:[A-Za-z0-9_.-]+/[A-Za-z0-9_-]+$'
-hosts() {    # name target role
-  rows "$HOSTS" 3 | while IFS=$'\t' read -r h t r; do
-    if [[ "$h" =~ $NAME_RE ]] && [[ "$t" =~ $TARGET_RE ]]; then printf '%s\t%s\t%s\n' "$h" "$t" "$r"
-    elif [ -z "${GWM_QUIET:-}" ]; then echo "go-with-me: skipping machine '$h' in hosts.conf (unsafe characters in its name or address)" >&2; fi
-  done
+NAME_RE='^[A-Za-z0-9_.-]+$'; FOLDER_RE='^[A-Za-z0-9_./~ -]+$'; MODEL_RE='^[A-Za-z0-9_.:/@-]+$'
+TARGET_RE='^([A-Za-z0-9_.-]+@)?[A-Za-z0-9_.:-]+$|^vm:[A-Za-z0-9_.-]+/[A-Za-z0-9_-]+$'
+hosts() {    # name target role (single-pass awk validation)
+  [ -f "$HOSTS" ] || die "missing $HOSTS — run: gwm init <this-host-name>"
+  awk -F'|' -v q="${GWM_QUIET:-}" -v nr="$NAME_RE" -v tr="$TARGET_RE" '
+    /^[[:space:]]*#/||/^[[:space:]]*$/{next}
+    {for(i=1;i<=3;i++){f[i]=$i; gsub(/^[[:space:]]+|[[:space:]]+$/,"",f[i])}
+     if(f[1] ~ nr && f[2] ~ tr) printf "%s\t%s\t%s\n", f[1], f[2], f[3]
+     else if(!q) printf "go-with-me: skipping machine '\''%s'\'' in hosts.conf (unsafe characters in its name or address)\n", f[1] > "/dev/stderr"}' "$HOSTS"
 }
-sessions() { # name host engine account folder
-  rows "$SESSIONS" 5 | while IFS=$'\t' read -r n h e a f; do
-    [ -n "$f" ] || f="~"
-    if [[ "$n" =~ $NAME_RE ]] && [ "$n" != coordinator ] && [[ "$h" =~ $NAME_RE ]] && [[ "$e" =~ $NAME_RE ]] \
-       && { [ "$a" = - ] || [[ "$a" =~ $NAME_RE ]]; } && [[ "$f" =~ $FOLDER_RE ]]; then printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$h" "$e" "$a" "$f"
-    elif [ -z "${GWM_QUIET:-}" ]; then echo "go-with-me: skipping session '$n' in sessions.conf (unsafe characters, or the reserved name 'coordinator')" >&2; fi
-  done
+sessions() { # name host engine account folder (single-pass awk validation)
+  [ -f "$SESSIONS" ] || die "missing $SESSIONS — run: gwm init <this-host-name>"
+  awk -F'|' -v q="${GWM_QUIET:-}" -v nr="$NAME_RE" -v fr="$FOLDER_RE" '
+    /^[[:space:]]*#/||/^[[:space:]]*$/{next}
+    {for(i=1;i<=5;i++){f[i]=$i; gsub(/^[[:space:]]+|[[:space:]]+$/,"",f[i])}
+     if(f[5]=="") f[5]="~"
+     if(f[1] ~ nr && f[1]!="coordinator" && f[2] ~ nr && f[3] ~ nr && (f[4]=="-" || f[4] ~ nr) && f[5] ~ fr)
+       printf "%s\t%s\t%s\t%s\t%s\n", f[1], f[2], f[3], f[4], f[5]
+     else if(!q) printf "go-with-me: skipping session '\''%s'\'' in sessions.conf (unsafe characters, or the reserved name '\''coordinator'\'')\n", f[1] > "/dev/stderr"}' "$SESSIONS"
 }
 qfolder() {  # a folder as a double-quoted shell word for the remote side ("~/x" -> "$HOME/x"); safe because folders are validated
   local f="${1:-~}"; case "$f" in "~") f='$HOME';; "~/"*) f='$HOME/'"${f#\~/}";; esac; printf '"%s"' "$f"
 }
-hfield() { hosts    | awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f; ok=1} END{exit !ok}'; }
-sfield() { sessions | awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f; ok=1} END{exit !ok}'; }
+hfield() { hosts    | awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f; ok=1; exit} END{exit !ok}'; }
+sfield() { sessions | awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f; ok=1; exit} END{exit !ok}'; }
 need_host()    { hfield "$1" 1 >/dev/null || die "unknown host '$1' (gwm hosts)"; }
 need_session() { sfield "$1" 1 >/dev/null || die "unknown session '$1' (gwm sessions)"; }
 is_local() { [ "$1" = "$(self_name)" ]; }
+is_uint()  { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]; }
+mtime()    { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+# Atomic config helpers: prevent concurrent probe/new/close/add writes from corrupting config files
+cfg_lock() {
+  local l="$CFG/.cfg-lock" i=0
+  [ -d "$l" ] && [ $(( $(date +%s) - $(mtime "$l") )) -gt 30 ] && rmdir "$l" 2>/dev/null || true
+  while ! mkdir "$l" 2>/dev/null; do i=$((i+1)); [ $i -ge 50 ] && return 1; sleep 0.05; done
+}
+cfg_unlock() { rmdir "$CFG/.cfg-lock" 2>/dev/null || true; }
+filter_conf() {  # filter_conf <file> <col> <drop-value> [extra-col2-regex]
+  local file="$1" col="$2" val="$3" re="${4:-}" tmp locked=0
+  cfg_lock && locked=1
+  tmp="$(mktemp "$file.XXXXXX")" || { [ $locked -eq 1 ] && cfg_unlock; return 1; }
+  awk -F'|' -v c="$col" -v n="$val" -v re="$re" '
+    {v=$c; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); t=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",t)}
+    !(v==n && (re=="" || t ~ re))' "$file" > "$tmp" && mv "$tmp" "$file" || rm -f "$tmp"
+  [ $locked -eq 1 ] && cfg_unlock
+}
+# Tombstones for closed sessions (30-day TTL) so adopt_sessions never resurrects a session closed while its host slept
+CLOSED_FILE="$CFG/.closed"
+mark_closed() {
+  local n="$1" now locked=0 tmp; now="$(date +%s)"
+  cfg_lock && locked=1
+  tmp="$(mktemp "$CFG/.closed.XXXXXX")"
+  { [ -f "$CLOSED_FILE" ] && awk -F'|' -v n="$n" -v cut="$((now - 2592000))" '$1!=n && $2+0>=cut' "$CLOSED_FILE"; printf '%s|%s\n' "$n" "$now"; } > "$tmp" && mv "$tmp" "$CLOSED_FILE" || rm -f "$tmp"
+  [ $locked -eq 1 ] && cfg_unlock
+}
+clear_closed() {
+  [ -f "$CLOSED_FILE" ] || return 0
+  local locked=0 tmp
+  cfg_lock && locked=1
+  tmp="$(mktemp "$CFG/.closed.XXXXXX")"
+  awk -F'|' -v n="$1" '$1!=n' "$CLOSED_FILE" > "$tmp" && mv "$tmp" "$CLOSED_FILE" || rm -f "$tmp"
+  [ $locked -eq 1 ] && cfg_unlock
+}
 
 # ---------- running things on hosts ----------
-# run_script <host> <script>   non-interactive; works for this machine, SSH hosts and Lima VMs
 PATHFIX='export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"'
-# Claude Code's own per-process markers (never CLAUDE_CONFIG_DIR, which picks the account). If a session inherits
-# them — e.g. the tmux server was first started from inside Claude Code — claude thinks it's a child process
-# and stops saving its conversation.
 CLAUDE_MARKERS="CLAUDECODE CLAUDE_PID CLAUDE_EFFORT CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_CHILD_NOTES_DIR CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SSE_PORT"
+scrub_env() {
+  local v; for v in $(env | sed -n 's/^\(CLAUDECODE\|CLAUDE_CODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
+  unset TERM_SESSION_ID SHELL_SESSION_ID SHELL_SESSION_DID_INIT SHELL_SESSION_FILE $CLAUDE_MARKERS
+}
+SSH_CTL_DIR="/tmp/gwm-ssh-$(id -u)"
+SSH_BASE=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=4 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)
+SSH_MUX=()
+if [ "${GWM_SSH_MUX:-1}" != 0 ]; then
+  [ -d "$SSH_CTL_DIR" ] || mkdir -p -m 700 "$SSH_CTL_DIR" 2>/dev/null || true
+  if [ -d "$SSH_CTL_DIR" ] && [ -O "$SSH_CTL_DIR" ] && [ ! -L "$SSH_CTL_DIR" ]; then
+    SSH_MUX=(-o ControlMaster=auto -o ControlPersist=15 -o "ControlPath=$SSH_CTL_DIR/%C")
+  fi
+fi
+vm_split() { VM_PARENT="${1#vm:}"; VM_PARENT="${VM_PARENT%%/*}"; VM_NAME="${1#*/}"; }
+ts_self_dns() { tailscale status --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null; }
+# run_script <host> <script>   non-interactive; works for this machine, SSH hosts and Lima VMs
 run_script() {
   [ -n "${GWM_DEMO:-}" ] && return 0
   local h="$1" s="$PATHFIX
 $2" t; t="$(hfield "$h" 2)"
   case "$t" in
-    vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
-          run_script "$parent" "limactl shell --workdir / $vm -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
+    vm:*) vm_split "$t"
+          run_script "$VM_PARENT" "limactl shell --workdir / $VM_NAME -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
     *) if is_local "$h"; then printf '%s\n' "$s" | env -u TMUX "${SHELL:-/bin/zsh}" -l -s
-       else printf '%s\n' "$s" | ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=4 -o ServerAliveInterval=5 \
-              -o ServerAliveCountMax=2 -o LogLevel="${GWM_SSH_LOGLEVEL:-ERROR}" "$t" 'exec "$SHELL" -l -s'; fi ;;
+       else printf '%s\n' "$s" | ssh "${SSH_BASE[@]}" ${SSH_MUX[@]+"${SSH_MUX[@]}"} -o LogLevel="${GWM_SSH_LOGLEVEL:-ERROR}" "$t" 'exec "$SHELL" -l -s'; fi ;;
   esac
 }
 # run_tty <host> <command>   interactive (needs a terminal)
 run_tty() {
   local h="$1" s="$PATHFIX; $2" t; t="$(hfield "$h" 2)"
   case "$t" in
-    vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
-          run_tty "$parent" "limactl shell --workdir / $vm -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
+    vm:*) vm_split "$t"
+          run_tty "$VM_PARENT" "limactl shell --workdir / $VM_NAME -- bash -l -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
     *) if is_local "$h"; then env -u TMUX -u TERM_SESSION_ID -u SHELL_SESSION_ID "${SHELL:-/bin/zsh}" -lc "$s"
        else ssh -t -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o LogLevel=ERROR \
               "$t" "exec \"\$SHELL\" -lc \"\$(printf %s $(b64 "$s") | base64 -d)\""; fi ;;
@@ -146,19 +193,22 @@ has_cmd() { run_script "$1" "command -v $2 >/dev/null 2>&1 && echo GWM_FOUND" 2>
 # --on <host> option parsing (default: this machine)
 ON=""; ARGS=()
 parse_on() { ON="$(self_name)"; ARGS=(); while [ $# -gt 0 ]; do
-  case "$1" in --on) ON="$2"; shift 2;; *) ARGS+=("$1"); shift;; esac; done; need_host "$ON"; }
+  case "$1" in --on) [ $# -ge 2 ] || die "--on needs a machine"; ON="$2"; shift 2;; *) ARGS+=("$1"); shift;; esac; done; need_host "$ON"; }
 
 # ---------- status ----------
 PROBE='
 if [ "$(uname)" = Darwin ]; then
-  cpu=$(top -l 2 -n 0 -s 1 2>/dev/null | awk "/CPU usage/{u=\$3+\$5} END{printf \"%d%%\", u}")
+  nc=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
+  cpu=$(ps -A -o %cpu= 2>/dev/null | awk -v n="$nc" "{s+=\$1} END{u=int(s/n+0.5); if(u>100)u=100; printf \"%d%%\", u}")
   pg=$(sysctl -n hw.pagesize); tot=$(( $(sysctl -n hw.memsize) / 1073741824 ))
   used=$(vm_stat | awk -v ps=$pg "/Anonymous pages/{a=\$3} /wired down/{w=\$4} /occupied by compressor/{c=\$5} END{gsub(/\\./,\"\",a);gsub(/\\./,\"\",w);gsub(/\\./,\"\",c); printf \"%.0f\", (a+w+c)*ps/1073741824}")
+  gpu=$(ioreg -r -d 1 -w 0 -c IOAccelerator 2>/dev/null | grep -o "\"Device Utilization %\"=[0-9]*" | head -1 | cut -d= -f2)
 else
-  read -r _ a b c d _ < /proc/stat; sleep 1; read -r _ a2 b2 c2 d2 _ < /proc/stat
+  read -r _ a b c d _ < /proc/stat; sleep 0.25; read -r _ a2 b2 c2 d2 _ < /proc/stat
   cpu="$(( 100 * ((a2+b2+c2)-(a+b+c)) / ((a2+b2+c2+d2)-(a+b+c+d) + 1) ))%"
   tot=$(awk "/MemTotal/{printf \"%.0f\", \$2/1048576}" /proc/meminfo)
   used=$(awk "/MemTotal/{t=\$2} /MemAvailable/{a=\$2} END{printf \"%.0f\", (t-a)/1048576}" /proc/meminfo)
+  gpu=$(command -v nvidia-smi >/dev/null && nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d " ")
 fi
 # loaded local models from oMLX (:8000) and Ollama (:11434), whichever run here: M|name|GB|format lines
 ml=$(python3 -c "import json, os, urllib.request as u
@@ -172,7 +222,6 @@ for m in get(\"http://127.0.0.1:8000/v1/models/status\").get(\"models\", []):
 for m in get(\"http://127.0.0.1:11434/api/ps\").get(\"models\", []): print(\"M|%s|%.1f|%s\" % (m[\"name\"], (m.get(\"size_vram\") or m.get(\"size\", 0)) / 1e9, (m.get(\"details\") or {}).get(\"format\", \"\")))" 2>/dev/null)
 models=$(printf "%s\n" "$ml" | awk -F"|" "NF>1{print \$2}" | sort -u | paste -sd, -)
 vms=$(command -v limactl >/dev/null && limactl list --format "{{.Name}}:{{.Status}}" 2>/dev/null | paste -sd, -)
-gpu=$(ioreg -r -d 1 -w 0 -c IOAccelerator 2>/dev/null | grep -o "\"Device Utilization %\"=[0-9]*" | head -1 | cut -d= -f2)
 echo "H|$cpu|$used/${tot}G|${models:--}|${vms:-}|${gpu:+$gpu%}"
 [ -n "$ml" ] && printf "%s\n" "$ml"
 if command -v tmux >/dev/null; then
@@ -181,16 +230,18 @@ if command -v tmux >/dev/null; then
   while IFS="|" read -r n act att title; do echo "S|${n#gwm-}|$((now-act))|$att|$(echo "$title" | tr "|" "/")"; done
 fi
 if [ "$(uname)" = Darwin ]; then
-  # who is using this machine over SSH: T = interactive terminals (tabs), C = all SSH connections, per source IP
   who | sed -n "s/.*(\(.*\))\$/\1/p" | sed "s/%.*//; s/^fe80:[0-9a-f]*::/fe80::/" | sort | uniq -c | while read -r k ip; do echo "T|$ip|$k"; done
   lsof -nP -iTCP:22 -sTCP:ESTABLISHED 2>/dev/null | awk "NR>1 && \$1 ~ /sshd/ {print \$9}" | sort -u | sed "s/.*->//" |
     sed "s/:[0-9]*\$//; s/^\[//; s/\]\$//; s/^fe80:[0-9a-f]*::/fe80::/" | sort | uniq -c | while read -r k ip; do echo "C|$ip|$k"; done
-  # Tailscale SSH logins run as: /usr/bin/login -f -pq -h <their tailscale ip> ...  (one per connection)
   ps -axo tty=,command= | awk "/\/usr\/bin\/login -f .* -h [0-9a-f.:]+ / {for(i=1;i<=NF;i++) if(\$i==\"-h\") print \$1, \$(i+1)}" |
     while read -r tt ip; do echo "C|$ip|1"; [ "$tt" != "??" ] && echo "T|$ip|1"; done
-  # this machine own addresses, so connections from other machines can be named
   echo "I|$( { ifconfig 2>/dev/null | awk "/inet6? /{print \$2}"; tailscale ip 2>/dev/null; } | sed "s/%.*//; s/^fe80:[0-9a-f]*::/fe80::/" | grep -vE "^(127\.|::1\$|fe80::1\$)" | sort -u | paste -sd, -)"
+else
+  who 2>/dev/null | sed -n "s/.*(\(.*\))\$/\1/p" | sed "s/%.*//" | sort | uniq -c | while read -r k ip; do echo "T|$ip|$k"; echo "C|$ip|$k"; done
+  echo "I|$( { hostname -I 2>/dev/null | tr " " "\n"; tailscale ip 2>/dev/null; } | grep -vE "^(127\.|::1\$|fe80:|\$)" | sort -u | paste -sd, -)"
 fi
+# this machine own sessions.conf, so a machine that missed a new session can pick it up: L|name|host|engine|account|folder
+[ -f ~/.config/go-with-me/sessions.conf ] && awk -F"|" "/^[[:space:]]*#/||NF<4{next} {o=\"L\"; for(i=1;i<=5;i++){v=\$i; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v); o=o \"|\" v} print o}" ~/.config/go-with-me/sessions.conf
 '
 demo_probe() {  # fake but lively data for `gwm demo`
   local t=$(( $(date +%s) / 5 )) r=$RANDOM
@@ -210,58 +261,108 @@ TS_CHECK="Tailscale SSH requires an additional check"
 probe_all() {  # → "host|H|..." and "host|S|..." lines, all hosts in parallel
   [ -n "${GWM_DEMO:-}" ] && { demo_probe; return; }
   local tmp; tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' INT TERM
   while IFS=$'\t' read -r h _; do
     ( o="$tmp/.$h.out" e="$tmp/.$h.err"
-      # (LogLevel INFO: at ERROR, ssh hides the message Tailscale sends when it wants the check.)
       GWM_SSH_LOGLEVEL=INFO run_script "$h" "$PROBE" >"$o" 2>"$e" & p=$!
-      # Tailscale SSH in "check" mode holds the login until someone approves it in a browser, which
-      # never happens in the background: stop waiting as soon as it asks, and at most after 15 s.
       for _ in $(seq 1 60); do kill -0 "$p" 2>/dev/null || break; grep -q "$TS_CHECK" "$e" 2>/dev/null && break; sleep 0.25; done
       kill -0 "$p" 2>/dev/null && { pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; }
       wait "$p" 2>/dev/null
-      out="$(grep -E '^[HSTCIM]\|' "$o")"
-      # A|<link>: the machine is up but Tailscale wants the login re-approved (open the link, or ssh there once).
+      out="$(grep -E '^[HSTCIML]\|' "$o")"
       [ -z "$out" ] && grep -q "$TS_CHECK" "$e" 2>/dev/null && out="A|$(grep -o 'https://login.tailscale.com/[^[:space:]]*' "$e" | head -1)"
       [ -n "$out" ] || out="DOWN"; printf '%s\n' "$out" | sed "s/^/$h|/" > "$tmp/$h"; rm -f "$o" "$e" ) &
   done < <(hosts)
-  wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
+  wait; adopt_sessions "$tmp"; cat "$tmp"/* 2>/dev/null | grep -v '^[^|]*|L|'; rm -rf "$tmp"
+  trap - INT TERM
 }
-ip_map() {  # "ip<TAB>hostname" for every SSH host, resolved from this machine (Bonjour .local names work)
+adopt_sessions() {  # adopt_sessions <probe dir>: add sessions other machines host that are missing here
+  [ -f "$SESSIONS" ] || return 0
+  local ph n h e a f me now lines=""
+  me="$(self_name)"; now="$(date +%s)"
+  while IFS='|' read -r ph _ n h e a f; do
+    [ "$ph" = "$h" ] && [ "$h" != "$me" ] || continue
+    [ -n "$f" ] || f="~"
+    [[ "$n" =~ $NAME_RE ]] && [ "$n" != coordinator ] && [[ "$h" =~ $NAME_RE ]] && [[ "$e" =~ $NAME_RE ]] \
+      && { [ "$a" = - ] || [[ "$a" =~ $NAME_RE ]]; } && [[ "$f" =~ $FOLDER_RE ]] || continue
+    # skip if explicitly closed locally (tombstone still valid)
+    [ -f "$CLOSED_FILE" ] && awk -F'|' -v n="$n" -v cut="$((now - 2592000))" '$1==n && $2+0>=cut{ok=1; exit} END{exit !ok}' "$CLOSED_FILE" && continue
+    hfield "$h" 1 >/dev/null 2>&1 || continue
+    GWM_QUIET=1 sfield "$n" 1 >/dev/null 2>&1 && continue
+    lines+="$(printf '%s | %s | %s | %s | %s\n' "$n" "$h" "$e" "$a" "$f")"$'\n'
+  done < <(cat "$1"/* 2>/dev/null | grep '^[^|]*|L|')
+  [ -n "$lines" ] || return 0
+  cfg_lock || return 0
+  while IFS= read -r ln; do
+    [ -n "$ln" ] || continue
+    n="${ln%% | *}"
+    GWM_QUIET=1 sfield "$n" 1 >/dev/null 2>&1 || printf '%s\n' "$ln" >> "$SESSIONS"
+  done <<<"$lines"
+  cfg_unlock
+}
+ip_map() {  # "ip<TAB>hostname" for every SSH host, cached 60s (invalidated when hosts.conf changes)
   [ -n "${GWM_DEMO:-}" ] && { printf '10.0.0.3\tmacbook\n'; return; }
+  local cache="$CFG/.ip-cache" now; now="$(date +%s)"
+  if [ -f "$cache" ] && [ $((now - $(mtime "$cache"))) -lt 60 ] && [ "$(mtime "$cache")" -ge "$(mtime "$HOSTS")" ]; then
+    cat "$cache"; return
+  fi
+  local tmp; tmp="$(mktemp "$CFG/.ip-cache.XXXXXX" 2>/dev/null)"
   while IFS=$'\t' read -r h t _; do
     case "$t" in vm:*) continue;; esac
-    local hn="${t#*@}" ip
+    local hn="${t#*@}"
     if [[ "$hn" =~ ^[0-9.]+$ ]]; then printf '%s\t%s\n' "$hn" "$h"
     else dscacheutil -q host -a name "$hn" 2>/dev/null | awk -v h="$h" '/ip_address|ipv6_address/{ip=$2; sub(/^fe80:[0-9a-f]*::/,"fe80::",ip); if(ip!="::1" && ip!="127.0.0.1" && ip!="fe80::1") printf "%s\t%s\n", ip, h}'; fi
-  done < <(hosts)
+  done < <(hosts) | if [ -n "$tmp" ]; then tee "$tmp"; mv "$tmp" "$cache" 2>/dev/null; else cat; fi
 }
-probe_ip_map() {  # "ip<TAB>host" from each machine's own reported addresses (I| lines)
-  grep '|I|' <<<"$1" | while IFS='|' read -r h _ ips; do tr ',' '\n' <<<"$ips" | sed "s/\$/	$h/"; done
+used_by() {  # used_by <host> <probe data> <ip map>  → "macbook: 2 tabs, 1 agent" (single awk pass)
+  awk -v h="$1" -v me="$(self_name)" '
+    FNR==NR {
+      split($0, p, "|")
+      if (p[2]=="I" && p[3]!="") {
+        m = split(p[3], ips, ",")
+        for (i=1; i<=m; i++) if (ips[i]!="" && !(ips[i] in ip2h)) ip2h[ips[i]] = p[1]
+      } else if (p[1]==h && p[2]=="C") {
+        if (!(p[3] in conns)) { co[++nc] = p[3] }
+        conns[p[3]] += p[4]
+      } else if (p[1]==h && p[2]=="T") {
+        tabs[p[3]] += p[4]
+      }
+      next
+    }
+    { split($0, m, "\t"); if (m[1]!="" && !(m[1] in ip2h)) ip2h[m[1]] = m[2] }
+    END {
+      for (i=1; i<=nc; i++) {
+        ip = co[i]
+        who = (ip in ip2h && ip2h[ip]!="") ? ip2h[ip] : ip
+        tc = tabs[ip] + 0
+        ac = conns[ip] - tc
+        if (who == me && h != me) ac -= 1
+        if (ac < 0) ac = 0
+        if (!(who in seen)) { seen[who]=1; ord[++nw]=who }
+        T[who] += tc; A[who] += ac
+      }
+      for (i=1; i<=nw; i++) {
+        w = ord[i]; s = ""
+        if (T[w]>0) s = T[w] " tab" (T[w]>1?"s":"")
+        if (A[w]>0) s = s (s?", ":"") A[w] " agent" (A[w]>1?"s":"")
+        if (s!="") out = out (out?"; ":"") w ": " s
+      }
+      print out
+    }' <(printf '%s\n' "$2") <(printf '%s\n' "$3")
 }
-used_by() {  # used_by <host> <probe data> <ip map>  → "macbook: 2 tabs, 1 agent"
-  local h="$1" data="$2" map me; me="$(self_name)"; map="$(probe_ip_map "$data"; printf '%s\n' "$3")"
-  grep "^$h|C|" <<<"$data" | awk -F'|' '{n[$3]+=$4} END{for(i in n) print "x|C|" i "|" n[i]}' | while IFS='|' read -r _ _ ip conns; do
-    local who tabs agents
-    who="$(awk -F'\t' -v ip="$ip" '$1==ip{print $2; exit}' <<<"$map")"; [ -n "$who" ] || who="$ip"
-    tabs="$(grep "^$h|T|$ip|" <<<"$data" | awk -F'|' '{t+=$4} END{print t+0}')"
-    agents=$((conns - tabs)); [ "$who" = "$me" ] && [ "$h" != "$me" ] && agents=$((agents - 1))   # minus this status check
-    [ "$agents" -lt 0 ] && agents=0
-    printf '%s %s %s\n' "$who" "$tabs" "$agents"
-  done | awk '{t[$1]+=$2; a[$1]+=$3; if(!($1 in o)){o[$1]=++n; k[n]=$1}}
-    END{for(i=1;i<=n;i++){w=k[i]; s="";
-      if(t[w]>0) s=t[w] " tab" (t[w]>1?"s":"");
-      if(a[w]>0) s=s (s?", ":"") a[w] " agent" (a[w]>1?"s":"");
-      if(s) out=out (out?"; ":"") w ": " s}
-    print out}'
-}
-mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
 probe_cached() {  # probe_cached <max-age-seconds>: one SSH sweep shared by the board and every sidebar
   local cache="$CFG/.probe-cache" lock="$CFG/.probe-lock" age=999 max="${1:-5}"
   [ -f "$cache" ] && age=$(( $(date +%s) - $(mtime "$cache") ))
   [ -d "$lock" ] && [ $(( $(date +%s) - $(mtime "$lock") )) -gt 60 ] && rmdir "$lock" 2>/dev/null
   if [ "$age" -gt "$max" ] && mkdir "$lock" 2>/dev/null; then
-    probe_all > "$cache.tmp.$$" && mv "$cache.tmp.$$" "$cache"; rmdir "$lock" 2>/dev/null
-  elif [ ! -f "$cache" ]; then probe_all; return; fi
+    local tmp; tmp="$(mktemp "$CFG/.probe-cache.XXXXXX")"
+    trap 'rm -f "$tmp"; rmdir "$lock" 2>/dev/null' INT TERM
+    ( probe_all ) > "$tmp" && mv "$tmp" "$cache" || rm -f "$tmp"
+    rmdir "$lock" 2>/dev/null
+    trap - INT TERM
+  elif [ ! -f "$cache" ]; then
+    local i=0; while [ ! -f "$cache" ] && [ -d "$lock" ] && [ $i -lt 40 ]; do sleep 0.1; i=$((i+1)); done
+    [ -f "$cache" ] || { probe_all; return; }
+  fi
   cat "$cache"
 }
 cmd_data() {  # machine-readable state for the sidebar
@@ -271,20 +372,21 @@ cmd_data() {  # machine-readable state for the sidebar
   while IFS=$'\t' read -r h _; do printf '#USED\t%s\t%s\n' "$h" "$(used_by "$h" "$data" "$map")"; done < <(hosts)
   printf '%s\n' "$data"
 }
+probe_line() { awk -F'|' -v h="$1" -v k="$2" -v n="${3:-}" '$1==h && $2==k && (n=="" || $3==n){print; exit}' <<<"$4"; }
 print_table() {
   local data cols map; data="$(probe_cached "${GWM_MAXAGE:-0}")"; map="$(ip_map)"; cols=$(tput cols 2>/dev/null || echo 140)
   printf "$(c '1;38;5;214')%-12s %-13s %5s %5s %-9s %-16s %-26s %s$(c 0)\n" HOST STATUS CPU GPU RAM "VMs" "USED BY (other devices)" "MODELS LOADED"
   while IFS=$'\t' read -r h t role; do
-    line="$(grep "^$h|H|" <<<"$data")"
+    line="$(probe_line "$h" H "" "$data")"
     if [ -n "$line" ]; then
       IFS='|' read -r _ _ cpu ram models vms gpu <<<"$line"
-      models="$(grep "^$h|M|" <<<"$data" | awk -F'|' '{n=$3; sub(/:latest$/,"",n); name[NR]=n; sz[NR]=$4; fmt[NR]=($5=="safetensors"?"mlx":$5); c[n]++}
-        END{for(i=1;i<=NR;i++) printf "%s%s%s (%s GB)", (i>1?", ":""), name[i], (c[name[i]]>1 && fmt[i]!="" ? " ·" fmt[i] : ""), sz[i]}')"
+      models="$(awk -F'|' -v h="$h" '$1==h && $2=="M"{n=$3; sub(/:latest$/,"",n); name[++k]=n; sz[k]=$4; fmt[k]=($5=="safetensors"?"mlx":$5); c[n]++}
+        END{for(i=1;i<=k;i++) printf "%s%s%s (%s GB)", (i>1?", ":""), name[i], (c[name[i]]>1 && fmt[i]!="" ? " ·" fmt[i] : ""), sz[i]}' <<<"$data")"
       st="● on"; is_local "$h" && st="● on (here)"; case "$t" in vm:*) st="● vm";; esac
       ub="$(used_by "$h" "$data" "$map")"
       printf "%-12s $(c 32)%-15s$(c 0) %5s %5s %-9s %-16.16s $(c 35)%-26.26s$(c 0) %s\n" "$h" "$st" "$cpu" "${gpu:--}" "$ram" "${vms:--}" "${ub:-—}" "${models:--}"
-    elif grep -q "^$h|A|" <<<"$data"; then
-      printf "%-12s $(c 33)%-15s$(c 0) %s\n" "$h" "◐ approval" "Tailscale SSH wants this login re-approved → ssh ${t} once, or open: $(grep "^$h|A|" <<<"$data" | cut -d'|' -f3)"
+    elif line="$(probe_line "$h" A "" "$data")" && [ -n "$line" ]; then
+      printf "%-12s $(c 33)%-15s$(c 0) %s\n" "$h" "◐ approval" "Tailscale SSH wants this login re-approved → ssh ${t} once, or open: $(cut -d'|' -f3 <<<"$line")"
     else
       printf "%-12s $(c 31)%-15s$(c 0) %s\n" "$h" "○ offline" "asleep / off / not set up → gwm doctor"
     fi
@@ -292,16 +394,16 @@ print_table() {
   echo
   printf "$(c '1;38;5;110')%-14s %-10s %-9s %-10s %-12s %s$(c 0)\n" SESSION HOST ENGINE ACCOUNT STATE "CURRENT TASK"
   while IFS=$'\t' read -r n h e a f; do
-    line="$(grep "^$h|S|$n|" <<<"$data")"
+    line="$(probe_line "$h" S "$n" "$data")"
     if [ -n "$line" ]; then
       IFS='|' read -r _ _ _ idle att title <<<"$line"
       if [ "$idle" -lt 8 ]; then st="working"; elif [ "$idle" -lt 3600 ]; then st="idle $((idle/60))m"; else st="idle $((idle/3600))h"; fi
       [ "$att" -gt 0 ] && st="$st *"
       col=32; [ "${st%% *}" = working ] && col=33
       printf "%-14s %-10s %-9s %-10s $(c $col)%-12s$(c 0) %s\n" "$n" "$h" "$e" "$a" "$st" "$title" | cut -c1-$((cols+12))
-    elif grep -q "^$h|H|" <<<"$data"; then
+    elif [ -n "$(probe_line "$h" H "" "$data")" ]; then
       printf "%-14s %-10s %-9s %-10s $(c 2)%-12s %s$(c 0)\n" "$n" "$h" "$e" "$a" "not running" "→ gwm open $n"
-    elif grep -q "^$h|A|" <<<"$data"; then
+    elif [ -n "$(probe_line "$h" A "" "$data")" ]; then
       printf "%-14s %-10s %-9s %-10s $(c 33)%-12s$(c 0)\n" "$n" "$h" "$e" "$a" "needs approval"
     else
       printf "%-14s %-10s %-9s %-10s $(c 31)%-12s$(c 0)\n" "$n" "$h" "$e" "$a" "host offline"
@@ -355,8 +457,9 @@ attach_loop() {
       echo "  $(c 1)Enter$(c 0)  bring it here — the other screen lets go"
       echo "  $(c 1)w$(c 0)      watch it here, read-only, without taking it"
       echo "  $(c 2)…or just wait: this tab connects by itself when the other screen lets go$(c 0)"
+      [ -t 0 ] || exit 0
       k=""; IFS= read -rsn1 -t 5 k; local rc=$?
-      if [ $rc -gt 128 ]; then continue; fi          # timed out: check again
+      if [ $rc -ne 0 ]; then continue; fi            # timed out (rc=1 on macOS bash 3.2, >128 on bash 4+): check again
       case "$k" in
         "") run_tty "$h" "$take" ;;
         w|W) clear; echo "Watching $label (read-only). Leave with ⌥X or by closing this tab."; run_tty "$h" "tmux attach-session -r -t '=$ts'" ;;
@@ -392,15 +495,17 @@ cmd_coordinator() {  # gwm coordinator [machine]: show or set where the shared c
   if [ -n "${1:-}" ]; then need_host "$1"; echo "$1" > "$CFG/coordinator"
     while IFS=$'\t' read -r h t _; do   # every machine must agree, or you'd get two coordinators
       is_local "$h" && continue; case "$t" in vm:*) continue;; esac
-      run_script "$h" "mkdir -p ~/.config/go-with-me && echo $1 > ~/.config/go-with-me/coordinator" >/dev/null 2>&1 || echo "$(c 33)•$(c 0) couldn't tell '$h' (offline?) — run there: gwm coordinator $1"
+      ( run_script "$h" "mkdir -p ~/.config/go-with-me && echo $1 > ~/.config/go-with-me/coordinator" >/dev/null 2>&1 \
+          || echo "$(c 33)•$(c 0) couldn't tell '$h' (offline?) — run there: gwm coordinator $1" ) &
     done < <(hosts)
+    wait
     echo "$(c 32)✓$(c 0) The coordinator now lives on '$1' on every machine (open hubs pick it up when restarted)."
   else echo "The coordinator lives on '$(coord_host)'. Change with: gwm coordinator <machine>"; fi
 }
 
 # ---------- hub (Zellij) ----------
 HUBNAME="${GWM_HUB:-gwm}"
-hub_running() { zellij list-sessions -n 2>/dev/null | grep -E "^$HUBNAME " | grep -vq EXITED; }
+hub_running() { zellij list-sessions -n 2>/dev/null | awk -v h="$HUBNAME" '$1==h && !/EXITED/{ok=1; exit} END{exit !ok}'; }
 tab_layout() {  # tab_layout <session>  → KDL for one session tab
   local n="$1" h e a; h="$(sfield "$n" 2)"; e="$(sfield "$n" 3)"; a="$(sfield "$n" 4)"
   local label="$n · $e on $h"; [ "$e" = claude ] && label="$label · account: $a"
@@ -411,8 +516,8 @@ bars() {  # every tab: the go-with-me sidebar on the left (the only navigation),
   printf '      pane size=34 borderless=true command="%s" { args "sidebar"; }\n      children\n    }\n  }\n' "$ME"
 }
 running_sessions() {  # names of configured sessions that are running right now on their machine
-  local data; data="$(probe_all)"
-  while IFS=$'\t' read -r n h _; do grep -q "^$h|S|$n|" <<<"$data" && echo "$n"; done < <(sessions)
+  local data; data="$(probe_cached 3)"
+  while IFS=$'\t' read -r n h _; do [ -n "$(probe_line "$h" S "$n" "$data")" ] && echo "$n"; done < <(sessions)
 }
 write_layout() {  # only sessions that are already running get a tab; others are opened with `gwm open <name>`
   local i=1 n
@@ -420,42 +525,36 @@ write_layout() {  # only sessions that are already running get a tab; others are
     printf '  tab name="1 overview" focus=true {\n'
     if [ -n "${GWM_DEMO:-}" ]; then printf '    pane focus=true command="bash" { args "%s"; }\n  }\n' "$DIR/demo/coordinator.sh"
     else printf '    pane focus=true command="%s" { args "attach-coordinator"; }\n  }\n' "$ME"; fi
-    for n in $(running_sessions); do i=$((i+1)); tab_layout "$n" | sed "1s/tab name=\"$n\"/tab name=\"$i $n\"/"; done
+    while IFS= read -r n; do [ -n "$n" ] || continue; i=$((i+1)); tab_layout "$n" | sed "1s/tab name=\"$n\"/tab name=\"$i $n\"/"; done < <(running_sessions)
     echo "}"; } > "$CFG/hub-layout.kdl"
 }
 cmd_open() {
   command -v zellij >/dev/null || die "zellij not installed (brew install zellij)"
   [ -n "$(self_name)" ] || die "run 'gwm init <this-host-name>' first"
   [ "${ZELLIJ_SESSION_NAME:-}" = "$HUBNAME" ] && die "you're already inside the go-with-me hub"
-  # don't leak this terminal's Claude Code session markers into the hub's Claude sessions
-  for v in $(env | sed -n 's/^\(CLAUDECODE\|CLAUDE_CODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
-  # Terminal.app gives each window a session id; passed into the hub, every new shell prints
-  # "Restored session: <date>" (and replays old history). The hub's terminals aren't Terminal.app windows.
-  unset TERM_SESSION_ID SHELL_SESSION_ID SHELL_SESSION_DID_INIT SHELL_SESSION_FILE $CLAUDE_MARKERS
-  # Zellij announces itself to the outer terminal to detect nesting; Terminal.app prints those
-  # announcements as text ("26661nCgkKA2d3bRICAQI=…"). Don't keep re-sending them.
+  scrub_env
   export ZELLIJ_NESTED_MAX_UNACKED_ANNOUNCES=0
   if hub_running; then exec zellij attach "$HUBNAME"; fi
   zellij delete-session "$HUBNAME" >/dev/null 2>&1
   echo "Checking which sessions are running…"; write_layout
   exec zellij --config "$DIR/hub.zellij.kdl" --session "$HUBNAME" --new-session-with-layout "$CFG/hub-layout.kdl"
 }
-hub_tabs() {  # "id<TAB>position<TAB>name-without-number" for every hub tab
+hub_tabs() {  # "id<TAB>position<TAB>name-without-number<TAB>raw-name" for every hub tab
   zellij --session "$HUBNAME" action list-tabs 2>/dev/null |
-    awk 'NR>1{id=$1; pos=$2; $1=$2=""; sub(/^[[:space:]]+/,""); sub(/^[0-9]+ /,""); printf "%s\t%s\t%s\n", id, pos, $0}'
+    awk 'NR>1{id=$1; pos=$2; $1=$2=""; sub(/^[[:space:]]+/,""); raw=$0; sub(/^[0-9]+ /,""); printf "%s\t%s\t%s\t%s\n", id, pos, $0, raw}'
 }
-renumber_tabs() {  # keep "N name" in sync with tab positions, so Alt+N always matches the number shown
+renumber_tabs() {  # keep "N name" in sync with tab positions in a single list-tabs call
   hub_running || return 0
-  hub_tabs | while IFS=$'\t' read -r id pos name; do
-    zellij --session "$HUBNAME" action list-tabs 2>/dev/null | awk -v id="$id" 'NR>1 && $1==id' | grep -q " $((pos+1)) $name\$" ||
-      zellij --session "$HUBNAME" action rename-tab-by-id "$id" "$((pos+1)) $name" >/dev/null 2>&1
+  hub_tabs | while IFS=$'\t' read -r id pos name raw; do
+    [ "$raw" = "$((pos+1)) $name" ] || zellij --session "$HUBNAME" action rename-tab-by-id "$id" "$((pos+1)) $name" >/dev/null 2>&1
   done
 }
 open_tab() {  # open (or jump to) the hub tab for <session>
   hub_running || return 1
-  if hub_tabs | cut -f3 | grep -qx "$1"; then
-    zellij --session "$HUBNAME" action go-to-tab-by-id "$(hub_tabs | awk -F'\t' -v n="$1" '$3==n{print $1; exit}')" >/dev/null 2>&1; return 0; fi
-  local tmp="$CFG/tab-$1.kdl"; { echo "layout {"; bars; tab_layout "$1" | sed '1s/^  tab [^{]*{/  tab {/'; echo "}"; } > "$tmp"
+  local id; id="$(hub_tabs | awk -F'\t' -v n="$1" '$3==n{print $1; exit}')"
+  if [ -n "$id" ]; then zellij --session "$HUBNAME" action go-to-tab-by-id "$id" >/dev/null 2>&1; return 0; fi
+  local tmp; tmp="$(mktemp "$CFG/tab-$1.XXXXXX.kdl")"
+  { echo "layout {"; bars; tab_layout "$1" | sed '1s/^  tab [^{]*{/  tab {/'; echo "}"; } > "$tmp"
   zellij --session "$HUBNAME" action new-tab --name "$1" --layout "$tmp" >/dev/null 2>&1; rm -f "$tmp"
   renumber_tabs
 }
@@ -465,17 +564,18 @@ close_tab() {  # close the hub tab for <session>, if open
   [ -n "$id" ] && zellij --session "$HUBNAME" action close-tab-by-id "$id" >/dev/null 2>&1
   renumber_tabs
 }
-sync_session() {  # sync_session add <name> <line> | remove <name>: keep every machine's sessions.conf in step
+sync_session() {  # sync_session add <name> <line> | remove <name>: keep every machine's sessions.conf in step (parallel)
   local op="$1" n="$2" line="${3:-}" enc h t
   enc="$(printf '%s\n' "$line" | base64 | tr -d '\n')"
   while IFS=$'\t' read -r h t _; do
     is_local "$h" && continue; case "$t" in vm:*) continue;; esac
-    if [ "$op" = add ]; then
-      run_script "$h" "f=~/.config/go-with-me/sessions.conf; [ -f \$f ] || exit 0; awk -F'|' -v n='$n' '{v=\$1; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v)} v==n{f=1} END{exit !f}' \$f || printf %s $enc | base64 -d >> \$f" >/dev/null 2>&1
-    else
-      run_script "$h" "f=~/.config/go-with-me/sessions.conf; [ -f \$f ] || exit 0; awk -F'|' -v n='$n' '{v=\$1; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v)} v!=n' \$f > \$f.new && mv \$f.new \$f" >/dev/null 2>&1
-    fi || echo "$(c 33)•$(c 0) couldn't update '$h' (offline?) — it'll catch up next time you run gwm add or gwm sync there"
+    ( if [ "$op" = add ]; then
+        run_script "$h" "f=~/.config/go-with-me/sessions.conf; [ -f \$f ] || exit 0; awk -F'|' -v n='$n' '{v=\$1; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v)} v==n{f=1} END{exit !f}' \$f || printf %s $enc | base64 -d >> \$f" >/dev/null 2>&1
+      else
+        run_script "$h" "f=~/.config/go-with-me/sessions.conf; [ -f \$f ] || exit 0; t=\$(mktemp \"\$f.XXXXXX\") && awk -F'|' -v n='$n' '{v=\$1; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v)} v!=n' \$f > \"\$t\" && mv \"\$t\" \$f" >/dev/null 2>&1
+      fi || echo "$(c 33)•$(c 0) couldn't update '$h' (offline?) — new sessions reach it automatically once it's back" ) &
   done < <(hosts)
+  wait
 }
 start_detached() {  # start_detached <name> <program…>: start a saved session in the background running a program
   local n="$1" h; h="$(sfield "$n" 2)"
@@ -485,8 +585,12 @@ start_detached() {  # start_detached <name> <program…>: start a saved session 
 cmd_spawn() {  # gwm spawn <name> --on <machine> [--engine e] [--account a] [--folder f] [--prompt "first task"]
   local n="" h="" e="claude" a="default" f="~" prompt=""
   while [ $# -gt 0 ]; do case "$1" in
-    --on) h="$2"; shift 2;; --engine) e="$2"; shift 2;; --account) a="$2"; shift 2;; --folder) f="$2"; shift 2;;
-    --prompt) prompt="$2"; shift 2;; *) n="$1"; shift;; esac; done
+    --on) [ $# -ge 2 ] || die "--on needs a machine"; h="$2"; shift 2;;
+    --engine) [ $# -ge 2 ] || die "--engine needs a value"; e="$2"; shift 2;;
+    --account) [ $# -ge 2 ] || die "--account needs a value"; a="$2"; shift 2;;
+    --folder) [ $# -ge 2 ] || die "--folder needs a value"; f="$2"; shift 2;;
+    --prompt) [ $# -ge 2 ] || die "--prompt needs a value"; prompt="$2"; shift 2;;
+    *) n="$1"; shift;; esac; done
   [ -n "$n" ] && [ -n "$h" ] || die "usage: gwm spawn <name> --on <machine> [--engine claude] [--account a] [--folder f] [--prompt \"task\"]"
   [ "$e" = claude ] || a="-"
   ensure_host "$h"; h="$ENSURED"
@@ -585,7 +689,11 @@ ask() {  # ask "Question" default  → reply (or default when not interactive)
 cmd_new() {
   local n="" h="" e="" a="" f="" u=""
   while [ $# -gt 0 ]; do case "$1" in
-    --on) h="$2"; shift 2;; --engine) e="$2"; shift 2;; --account) a="$2"; shift 2;; --folder) f="$2"; shift 2;; --user) u="$2"; shift 2;;
+    --on) [ $# -ge 2 ] || die "--on needs a machine"; h="$2"; shift 2;;
+    --engine) [ $# -ge 2 ] || die "--engine needs a value"; e="$2"; shift 2;;
+    --account) [ $# -ge 2 ] || die "--account needs a value"; a="$2"; shift 2;;
+    --folder) [ $# -ge 2 ] || die "--folder needs a value"; f="$2"; shift 2;;
+    --user) [ $# -ge 2 ] || die "--user needs a value"; u="$2"; shift 2;;
     *) n="$1"; shift;; esac; done
   echo "$(c 1)New session$(c 0) — a new tab running on one of your machines"
   if [ -z "$h" ]; then
@@ -608,8 +716,11 @@ cmd_new() {
   [[ "$f" =~ $FOLDER_RE ]] || die "folder: letters, digits, spaces and _ . / ~ - only"
   { [ "$a" = - ] || [[ "$a" =~ $NAME_RE ]]; } || die "account: letters, digits, _ . - only"
   sfield "$n" 1 >/dev/null 2>&1 && die "a session called '$n' already exists"
-  local line; line="$(printf '%-14s| %-8s| %-9s| %-8s| %s' "$n" "$h" "$e" "$a" "$f")"
+  local line locked=0; line="$(printf '%-14s| %-8s| %-9s| %-8s| %s' "$n" "$h" "$e" "$a" "$f")"
+  clear_closed "$n"
+  cfg_lock && locked=1
   printf '%s\n' "$line" >> "$SESSIONS"
+  [ $locked -eq 1 ] && cfg_unlock
   sync_session add "$n" "$line"
   [ -n "${GWM_NO_TAB:-}" ] || open_tab "$n"
   echo "$(c 32)✓$(c 0) Added '$n' ($e on $h$([ "$e" = claude ] && echo ", account $a"))."
@@ -635,12 +746,13 @@ cmd_close() {
   if sfield "$n" 1 >/dev/null 2>&1; then save_record "$h" "$n" "$(sfield "$n" 3)" "$(sfield "$n" 4)" "$(sfield "$n" 5)"
   else save_record "$h" "$n" claude default "~"; fi
   run_script "$h" "$(archive_cmd "$n"); tmux kill-session -t '=$PFX$n' 2>/dev/null" || true
-  awk -F'|' -v n="$n" '{v=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$SESSIONS" > "$SESSIONS.new" && mv "$SESSIONS.new" "$SESSIONS"
+  mark_closed "$n"
+  filter_conf "$SESSIONS" 1 "$n"
   sync_session remove "$n"
   close_tab "$n"
   echo "$(c 32)✓$(c 0) Closed '$n' on $h."
 }
-cmd_peek() { local n="$1" k="${2:-40}"; need_session "$n"
+cmd_peek() { local n="$1" k="${2:-40}"; need_session "$n"; is_uint "$k" || die "lines must be a positive number"
   run_script "$(sfield "$n" 2)" "tmux capture-pane -p -J -t '=$PFX$n:' -S -$k 2>/dev/null | awk 'NF{p=NR} {l[NR]=\$0} END{for(i=1;i<=p;i++) print l[i]}' || echo '(session $n is not running)'"; }
 cmd_send() { local n="$1"; shift; need_session "$n"
   run_script "$(sfield "$n" 2)" "printf %s $(b64 "$*") | base64 -d | tmux load-buffer -b gwm - && tmux paste-buffer -d -b gwm -t '=$PFX$n:' && sleep 0.3 && tmux send-keys -t '=$PFX$n:' Enter && echo 'sent to $n'"; }
@@ -650,8 +762,15 @@ history_run() {  # history_run <host> <name> <lines|-1> <folder> <config-dir> [t
 acct_dir() { if [ -n "${1:-}" ] && [ "$1" != default ] && [ "$1" != - ]; then echo "\$HOME/.config/go-with-me/accounts/$1"; else echo "\$HOME/.claude"; fi; }
 cmd_history() {  # gwm history <session>|--all [lines]: the session's Claude conversation, from the machine it runs on
   local n="${1:-}" k="${2:-40}"; [ -n "$n" ] || die "usage: gwm history <session>|--all [lines]"
+  is_uint "$k" || die "lines must be a positive number"
   if [ "$n" = --all ]; then
-    sessions | awk -F'\t' '$3=="claude"{print $1}' | while read -r x; do cmd_history "$x" "$k"; echo; echo "────────"; done; return
+    local tmp i=0 x; tmp="$(mktemp -d)"
+    while read -r x; do
+      i=$((i+1)); ( cmd_history "$x" "$k" > "$tmp/$(printf '%04d' "$i")" 2>&1 ) &
+    done < <(sessions | awk -F'\t' '$3=="claude"{print $1}')
+    wait
+    local first=1 f; for f in "$tmp"/*; do [ -f "$f" ] || continue; [ $first -eq 1 ] && first=0 || printf '\n────────\n'; cat "$f"; done
+    rm -rf "$tmp"; return
   fi
   if ! sfield "$n" 1 >/dev/null 2>&1; then   # closed? use its archive record
     local rec; rec="$(archive_records | awk -F'\t' -v n="$n" '$1==n' | sort -t$'\t' -k7 | tail -1)"
@@ -660,9 +779,8 @@ cmd_history() {  # gwm history <session>|--all [lines]: the session's Claude con
     [ -n "$rt" ] || die "'$n' was closed without a Claude conversation"
     history_run "$rh" "$n" "$k" "~" "" "$rt"; return
   fi
-  local a f cfgdir; a="$(sfield "$n" 4)"; f="$(sfield "$n" 5)"; [ -n "$f" ] || f="~"
-  if [ -n "$a" ] && [ "$a" != default ] && [ "$a" != - ]; then cfgdir="\$HOME/.config/go-with-me/accounts/$a"; else cfgdir="\$HOME/.claude"; fi
-  run_script "$(sfield "$n" 2)" "python3 -c \"\$(printf %s $(base64 < "$DIR/history.py" | tr -d '\n') | base64 -d)\" '$n' '$k' $(qfolder "$f") \"$cfgdir\""
+  local a f; a="$(sfield "$n" 4)"; f="$(sfield "$n" 5)"; [ -n "$f" ] || f="~"
+  history_run "$(sfield "$n" 2)" "$n" "$k" "$f" "$(acct_dir "$a")"
 }
 # archive_cmd <session>: save everything on the session's screen (and its scrollback) before it's stopped.
 # Claude's own conversation files (~/.claude/projects) are never touched.
@@ -680,17 +798,21 @@ print(json.dumps({"name": n, "host": h, "engine": e, "account": a, "folder": f, 
   run_script "$h" "mkdir -p ~/.config/go-with-me/archive && printf %s $(b64 "$rec") | base64 -d > ~/.config/go-with-me/archive/$n-\$(date +%Y%m%d-%H%M%S).json" >/dev/null 2>&1
   [ -n "$(sed -n 's/.*"session_id": "\([^"]*\)".*/\1/p' <<<"$rec")" ] && echo "saved its Claude conversation for later — resume with: gwm resume $n"
 }
-archive_records() {  # every closed-session record on every machine: name host engine account folder title closed session_id transcript
+archive_records() {  # every closed-session record on every machine (parallel)
+  local tmp; tmp="$(mktemp -d)"
   while IFS=$'\t' read -r h t _; do
     case "$t" in vm:*) continue;; esac
-    run_script "$h" 'for f in ~/.config/go-with-me/archive/*.json; do [ -f "$f" ] && { cat "$f"; echo; }; done; true' 2>/dev/null
-  done < <(hosts) | python3 -c 'import json,sys
+    ( run_script "$h" 'for f in ~/.config/go-with-me/archive/*.json; do [ -f "$f" ] && { cat "$f"; echo; }; done; true' > "$tmp/$h" 2>/dev/null ) &
+  done < <(hosts)
+  wait
+  cat "$tmp"/* 2>/dev/null | python3 -c 'import json,sys
 for l in sys.stdin:
     l=l.strip()
     if not l: continue
     try: r=json.loads(l)
     except ValueError: continue
     print("\t".join(str(r.get(k,"")).replace("\t"," ") for k in ("name","host","engine","account","folder","title","closed","session_id","transcript")))'
+  rm -rf "$tmp"
 }
 cmd_archive() {
   local recs; recs="$(archive_records)"
@@ -705,30 +827,33 @@ cmd_stop() { local n="$1"; need_session "$n"
 cmd_who() {  # who is using which machine right now
   local data map; data="$(probe_all)"; map="$(ip_map)"
   while IFS=$'\t' read -r h _; do
-    if grep -q "^$h|H|" <<<"$data"; then ub="$(used_by "$h" "$data" "$map")"; printf "%-12s %s\n" "$h" "${ub:-nobody else}"
-    elif grep -q "^$h|A|" <<<"$data"; then printf "%-12s %s\n" "$h" "needs approval (Tailscale SSH check)"
+    if [ -n "$(probe_line "$h" H "" "$data")" ]; then ub="$(used_by "$h" "$data" "$map")"; printf "%-12s %s\n" "$h" "${ub:-nobody else}"
+    elif [ -n "$(probe_line "$h" A "" "$data")" ]; then printf "%-12s %s\n" "$h" "needs approval (Tailscale SSH check)"
     else printf "%-12s %s\n" "$h" "offline"; fi
   done < <(hosts)
 }
 
 # ---------- hosts ----------
 cmd_run() { local h="$1"; shift; need_host "$h"; run_script "$h" "cd ~ && eval \"\$(printf %s $(b64 "$*") | base64 -d)\""; }
-cmd_doctor() {
+cmd_doctor() {  # check every host in parallel, printing in hosts.conf order
+  local tmp i=0 h t role; tmp="$(mktemp -d)"
   while IFS=$'\t' read -r h t role; do
-    printf "$(c 1)%s$(c 0)  %s\n" "$h" "$(is_local "$h" && echo "(this machine)" || echo "$t")"
-    out="$(run_script "$h" 'echo reach-ok; for x in tmux claude opencode omlx ollama limactl; do command -v $x >/dev/null && echo "$x-ok"; done; [ "$(uname)" = Darwin ] && pmset -g | awk "/ sleep /{print \"sleep=\"\$2}"' 2>&1)"
-    if ! grep -q reach-ok <<<"$out"; then
-      echo "  $(c 31)✗ unreachable:$(c 0) $(tail -1 <<<"$out")"
-      case "$t" in vm:*) echo "    → start it: gwm vm start ${t#*/} --on ${t#vm:}" | sed 's#/[^ ]*$##';;
-        *) echo "    → on $h: System Settings → General → Sharing → Remote Login ON"
-           echo "    → then on $h:  ssh $(hfield "$(self_name)" 2 2>/dev/null) cat .ssh/id_ed25519.pub >> ~/.ssh/authorized_keys";; esac
-      continue
-    fi
-    for x in tmux claude opencode omlx ollama limactl; do
-      grep -q "^$x-ok" <<<"$out" && printf "  $(c 32)✓$(c 0) %s" "$x" || printf "  $(c 2)· %s$(c 0)" "$x"; done; echo
-    s="$(grep sleep= <<<"$out" | cut -d= -f2)"
-    [ -n "$s" ] && { [ "$s" = 0 ] && echo "  $(c 32)✓$(c 0) never sleeps" || echo "  $(c 33)•$(c 0) sleeps after $s min (servers: sudo pmset -a sleep 0)"; }
+    i=$((i+1))
+    ( out="$(run_script "$h" 'echo reach-ok; for x in tmux claude opencode omlx ollama limactl; do command -v $x >/dev/null && echo "$x-ok"; done; [ "$(uname)" = Darwin ] && pmset -g | awk "/ sleep /{print \"sleep=\"\$2}"' 2>&1)"
+      { printf "$(c 1)%s$(c 0)  %s\n" "$h" "$(is_local "$h" && echo "(this machine)" || echo "$t")"
+        if ! grep -q reach-ok <<<"$out"; then
+          echo "  $(c 31)✗ unreachable:$(c 0) $(tail -1 <<<"$out")"
+          case "$t" in vm:*) vm_split "$t"; echo "    → start it: gwm vm start $VM_NAME --on $VM_PARENT" ;;
+            *) echo "    → on $h: System Settings → General → Sharing → Remote Login ON"
+               echo "    → then on $h:  ssh $(hfield "$(self_name)" 2 2>/dev/null) cat .ssh/id_ed25519.pub >> ~/.ssh/authorized_keys" ;; esac
+        else
+          for x in tmux claude opencode omlx ollama limactl; do
+            grep -q "^$x-ok" <<<"$out" && printf "  $(c 32)✓$(c 0) %s" "$x" || printf "  $(c 2)· %s$(c 0)" "$x"; done; echo
+          s="$(grep sleep= <<<"$out" | cut -d= -f2)"
+          [ -n "$s" ] && { [ "$s" = 0 ] && echo "  $(c 32)✓$(c 0) never sleeps" || echo "  $(c 33)•$(c 0) sleeps after $s min (servers: sudo pmset -a sleep 0)"; }
+        fi; } > "$tmp/$(printf '%04d' "$i")" ) &
   done < <(hosts)
+  wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
 }
 
 # ---------- accounts ----------
@@ -743,6 +868,7 @@ for d in $HOME/.config/go-with-me/accounts/*/; do [ -d "$d" ] && printf "%-12s %
 }
 cmd_login() {
   local a; parse_on "$@"; a="${ARGS[0]:-}"; [ -n "$a" ] || die "usage: gwm login <account> [--on host]"
+  [[ "$a" =~ $NAME_RE ]] || die "account: letters, digits, _ . - only"
   if [ "$a" = default ]; then run_tty "$ON" "claude auth login"
   else run_tty "$ON" "mkdir -p $ACCT_DIR/$a && CLAUDE_CONFIG_DIR=$ACCT_DIR/$a claude auth login"; fi
 }
@@ -762,14 +888,15 @@ cmd_vm() {
         printf "Delete VM '%s' on %s and everything inside it? [y/N] " "$name" "$ON"; read -r r; case "$r" in y|Y|yes) ;; *) echo Cancelled.; return;; esac
       fi
       run_script "$ON" "limactl delete --force $name" && {
-        awk -F'|' -v n="$name" '{v=$1; t=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); gsub(/^[[:space:]]+|[[:space:]]+$/,"",t)} !(v==n && t ~ /^vm:/)' "$HOSTS" > "$HOSTS.new" && mv "$HOSTS.new" "$HOSTS"
-        awk -F'|' -v n="$name" '{h=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",h)} h!=n' "$SESSIONS" > "$SESSIONS.new" && mv "$SESSIONS.new" "$SESSIONS"
+        filter_conf "$HOSTS" 1 "$name" '^vm:'
+        filter_conf "$SESSIONS" 2 "$name"
         echo "Deleted VM $name and removed it from your config."; } ;;
     create)
       [ -n "$name" ] || die "usage: gwm vm create <name> [--on host] [--cpus N] [--memory GB] [--disk GB]"
       local cpus=4 mem=8 disk=60 i=1
       while [ $i -lt ${#ARGS[@]} ]; do case "${ARGS[$i]}" in
         --cpus) cpus="${ARGS[$((i+1))]}";; --memory) mem="${ARGS[$((i+1))]}";; --disk) disk="${ARGS[$((i+1))]}";; esac; i=$((i+2)); done
+      is_uint "$cpus" && is_uint "$mem" && is_uint "$disk" || die "--cpus, --memory and --disk must be positive integers"
       echo "Creating Linux VM '$name' on $ON ($cpus CPUs, ${mem}GB RAM, ${disk}GB disk). First time downloads Ubuntu (~600MB)…"
       run_script "$ON" "limactl create --name=$name --cpus=$cpus --memory=$mem --disk=$disk --tty=false template:default && limactl start $name" || die "VM creation failed"
       echo "Installing tmux, git and Claude Code inside the VM…"
@@ -792,14 +919,16 @@ for m in json.load(sys.stdin).get(\"models\", []):
 elif command -v ollama >/dev/null; then echo "INSTALLED"; ollama list; echo; echo "LOADED IN MEMORY"; ollama ps
 else echo "no local model server (oMLX: brew tap jundot/omlx https://github.com/jundot/omlx && brew install jundot/omlx/omlx && omlx start)"; fi'; }
 cmd_pull() { parse_on "$@"; local m="${ARGS[0]:-}"; [ -n "$m" ] || die "usage: gwm pull <model> [--on host]"
+  [[ "$m" =~ $MODEL_RE ]] || die "invalid model name '$m'"
   case "$m" in
     */*) run_tty "$ON" "py=/opt/homebrew/opt/omlx/libexec/bin/python; [ -x \$py ] || { echo 'oMLX not installed'; exit 1; }
 \$py -c 'import sys, os; from huggingface_hub import snapshot_download; print(snapshot_download(sys.argv[1], local_dir=os.path.expanduser(\"~/.omlx/models/\") + sys.argv[1].split(\"/\")[-1]))' '$m'" ;;
-    *) run_tty "$ON" "ollama pull $m" ;;
+    *) run_tty "$ON" "ollama pull '$m'" ;;
   esac; }
 cmd_opencode_setup() {
   parse_on "$@"; local model="" i=0
   while [ $i -lt ${#ARGS[@]} ]; do [ "${ARGS[$i]}" = --model ] && model="${ARGS[$((i+1))]}"; i=$((i+1)); done
+  [ -z "$model" ] || [[ "$model" =~ $MODEL_RE ]] || die "invalid model name '$model'"
   run_script "$ON" "
 f=\$HOME/.config/opencode/opencode.json; mkdir -p \$(dirname \$f); [ -f \$f ] && cp \$f \$f.bak
 t=\$(mktemp); srv=ollama; k=\$(cat ~/.omlx/api_key 2>/dev/null); A=(); [ -n \"\$k\" ] && A=(-H \"Authorization: Bearer \$k\")
@@ -839,7 +968,7 @@ SESSIONS_HEADER='# go-with-me sessions (tabs):  name | machine | engine | accoun
 #   gwm new / gwm close edit this file for you.'
 
 my_address() {  # best address other machines can use to reach this one
-  local ts; ts="$(tailscale status --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)"
+  local ts; ts="$(ts_self_dns)"
   if [ -n "$ts" ]; then echo "$ts"; else echo "$(scutil --get LocalHostName 2>/dev/null || hostname -s).local"; fi
 }
 ensure_key() {  # make sure this machine has an SSH key; print the public key
@@ -848,20 +977,25 @@ ensure_key() {  # make sure this machine has an SSH key; print the public key
   cat "$HOME/.ssh/id_ed25519.pub"
 }
 upsert_host() {  # upsert_host name target role
-  awk -F'|' -v n="$1" '{v=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$HOSTS" > "$HOSTS.new"
-  printf '%-10s| %-40s| %s\n' "$1" "$2" "$3" >> "$HOSTS.new"; mv "$HOSTS.new" "$HOSTS"
+  filter_conf "$HOSTS" 1 "$1"
+  local locked=0; cfg_lock && locked=1
+  printf '%-10s| %-40s| %s\n' "$1" "$2" "$3" >> "$HOSTS"
+  [ $locked -eq 1 ] && cfg_unlock
+}
+local_ram_gb() {
+  if [ "$(uname)" = Darwin ]; then echo "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
+  else awk '/MemTotal/{printf "%.0f", $2/1048576}' /proc/meminfo 2>/dev/null || echo 0; fi
 }
 cmd_init() {
   local n="${1:-}"
-  [ -n "$n" ] || n="$(ask "Name for this machine (short, e.g. studio, macbook)" "$(scutil --get LocalHostName 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g' | cut -c1-20)")"
+  [ -n "$n" ] || n="$(ask "Name for this machine (short, e.g. studio, macbook)" "$({ scutil --get LocalHostName 2>/dev/null || hostname -s; } | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g' | cut -c1-20)")"
   [[ "$n" =~ ^[A-Za-z0-9_-]+$ ]] || die "name: letters, digits, - and _ only"
   mkdir -p "$CFG/accounts"
   [ -f "$HOSTS" ]    || printf '%s\n\n' "$HOSTS_HEADER" > "$HOSTS"
   [ -f "$SESSIONS" ] || printf '%s\n\n' "$SESSIONS_HEADER" > "$SESSIONS"
   echo "$n" > "$SELF_FILE"
   if ! hfield "$n" 1 >/dev/null 2>&1; then
-    local ram; ram="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
-    upsert_host "$n" "$(whoami)@$(my_address)" "$(sysctl -n hw.model 2>/dev/null || uname -s), ${ram}GB"
+    upsert_host "$n" "$(whoami)@$(my_address)" "$(sysctl -n hw.model 2>/dev/null || uname -s), $(local_ram_gb)GB"
   fi
   ensure_key >/dev/null
   echo "$(c 32)✓$(c 0) This machine is '$n' ($(whoami)@$(my_address)). Config: $CFG"
@@ -945,11 +1079,10 @@ INBOX='.cache/go-with-me/inbox'
 pipe_host() {  # pipe_host <host> <sh script>: run it on a host with stdin/stdout passed straight through (for files)
   local h="$1" s="$PATHFIX; $2" t; t="$(hfield "$h" 2)"
   case "$t" in
-    vm:*) local parent="${t#vm:}"; parent="${parent%%/*}"; local vm="${t#*/}"
-          pipe_host "$parent" "limactl shell --workdir / $vm -- sh -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
+    vm:*) vm_split "$t"
+          pipe_host "$VM_PARENT" "limactl shell --workdir / $VM_NAME -- sh -c \"\$(printf %s $(b64 "$s") | base64 -d)\"" ;;
     *) if is_local "$h"; then sh -c "$s"
-       else ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o LogLevel=ERROR "$t" \
-              "sh -c \"\$(printf %s $(b64 "$s") | base64 -d)\""; fi ;;
+       else ssh "${SSH_BASE[@]}" ${SSH_MUX[@]+"${SSH_MUX[@]}"} -o LogLevel=ERROR "$t" "sh -c \"\$(printf %s $(b64 "$s") | base64 -d)\""; fi ;;
   esac
 }
 recv_script() {  # a tar stream on stdin → unpacked into a new inbox folder; prints the path of each item
@@ -960,7 +1093,7 @@ d=\"\$i/$1\"; mkdir -p \"\$d\"; tar -xf - -C \"\$d\" || { rm -rf \"\$d\"; exit 1
 stamp() { echo "$(date +%Y%m%d-%H%M%S)-$RANDOM"; }
 send_local() {  # send_local <host> <path…>: copy files/folders from this machine into <host>'s inbox
   local h="$1" p args=(); shift
-  for p in "$@"; do p="$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"; args+=(-C "$(dirname "$p")" "./$(basename "$p")"); done
+  for p in "$@"; do p="$(cd "$(dirname -- "$p")" && pwd)/$(basename -- "$p")"; args+=(-C "$(dirname -- "$p")" "./$(basename -- "$p")"); done
   ( set -o pipefail; COPYFILE_DISABLE=1 tar -cf - "${args[@]}" | pipe_host "$h" "$(recv_script "$(stamp)")" )
 }
 send_remote() {  # send_remote <from-host> <from-folder> <path> <to-host>: copy a file/folder between two machines
@@ -969,8 +1102,8 @@ send_remote() {  # send_remote <from-host> <from-folder> <path> <to-host>: copy 
     pipe_host "$src" "cd $(qfolder "$folder") 2>/dev/null || cd; p=\"\$(printf %s $(b64 "$p") | base64 -d)\"
 case \"\$p\" in '~') p=\"\$HOME\";; '~/'*) p=\"\$HOME/\${p#??}\";; esac
 [ -e \"\$p\" ] || { echo \"go-with-me: no such file on $src: \$p\" >&2; exit 1; }
-p=\"\$(cd \"\$(dirname \"\$p\")\" && pwd)/\$(basename \"\$p\")\"
-COPYFILE_DISABLE=1 tar -cf - -C \"\$(dirname \"\$p\")\" \"./\$(basename \"\$p\")\"" | pipe_host "$dst" "$(recv_script "$(stamp)")" )
+p=\"\$(cd \"\$(dirname -- \"\$p\")\" && pwd)/\$(basename -- \"\$p\")\"
+COPYFILE_DISABLE=1 tar -cf - -C \"\$(dirname -- \"\$p\")\" \"./\$(basename -- \"\$p\")\"" | pipe_host "$dst" "$(recv_script "$(stamp)")" )
 }
 target_session() {  # target_session [name] → "name<TAB>host<TAB>tmux-session"; no name = the hub tab you're looking at
   local n="${1:-}"
@@ -1019,6 +1152,7 @@ cmd_paste() {  # gwm paste [session] [--last] [--no-type]
   for a in "$@"; do case "$a" in --last) last=1;; --no-type) notype=1;; -*) die "usage: gwm paste [session] [--last] [--no-type]";; *) n="$a";; esac; done
   t="$(target_session "$n")" || exit 1; IFS=$'\t' read -r name h ts <<<"$t"
   tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT INT TERM
   if [ -z "$last" ]; then
     while IFS=$'\t' read -r kind p; do [ -n "$p" ] && files+=("$p"); done < <(clip_grab "$tmp")
   fi
@@ -1123,13 +1257,15 @@ cmd_chrome() {  # gwm chrome [start|stop|status] [--to machine]…
     start)
       chrome_start
       echo "$(c 32)✓$(c 0) The go-with-me browser is open on this Mac (its own Chrome window and profile)."
+      local tmp i=0; tmp="$(mktemp -d)"
       for h in $(chrome_hosts ${to[@]+"${to[@]}"}); do
-        echo "$(c 1)$h$(c 0)$(is_local "$h" && echo ' (here)')"
         if ! is_local "$h" && [ -z "$(tunnel_pid "$h")" ]; then
           nohup "$ME" _chrome-tunnel "$h" >"$CHROME_DIR/tunnel-$h.log" 2>&1 </dev/null & echo $! > "$CHROME_DIR/tunnel-$h.pid"
         fi
-        chrome_mcp_add "$h"
+        i=$((i+1))
+        ( { echo "$(c 1)$h$(c 0)$(is_local "$h" && echo ' (here)')"; chrome_mcp_add "$h"; } > "$tmp/$(printf '%04d' "$i")" ) &
       done
+      wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp"
       echo
       echo "Claude sessions use it through the $(c 1)$CHROME_MCP$(c 0) tools — just ask Claude to open a page. Check: gwm chrome status"
       echo "$(c 2)It stays shared until you quit that Chrome window or run gwm chrome stop. One Mac at a time can share its browser to a machine.$(c 0)" ;;
@@ -1139,12 +1275,15 @@ cmd_chrome() {  # gwm chrome [start|stop|status] [--to machine]…
       echo "$(c 32)✓$(c 0) Closed the go-with-me browser and stopped sharing it (its profile and sign-ins stay in $CHROME_DIR)." ;;
     status)
       if chrome_up; then echo "Browser: $(c 32)● open$(c 0) on this Mac (port $CHROME_PORT)"; else echo "Browser: $(c 2)○ not open here$(c 0) → gwm chrome"; fi
+      local tmp i=0; tmp="$(mktemp -d)"
       for h in $(chrome_hosts ${to[@]+"${to[@]}"}); do
-        r="$(run_script "$h" "curl -s -m 2 http://127.0.0.1:$CHROME_PORT/json/version >/dev/null 2>&1 && echo GWM_REACH; command -v claude >/dev/null && claude mcp get $CHROME_MCP >/dev/null 2>&1 && echo GWM_MCP" 2>/dev/null)"
-        printf '  %-12s %s · %s\n' "$h" \
-          "$(grep -q GWM_REACH <<<"$r" && echo "$(c 32)reaches a browser$(c 0)" || echo "$(c 31)no browser$(c 0)")" \
-          "$(grep -q GWM_MCP <<<"$r" && echo "tools added" || echo "tools not added (default account) → gwm chrome")"
-      done ;;
+        i=$((i+1))
+        ( r="$(run_script "$h" "curl -s -m 2 http://127.0.0.1:$CHROME_PORT/json/version >/dev/null 2>&1 && echo GWM_REACH; command -v claude >/dev/null && claude mcp get $CHROME_MCP >/dev/null 2>&1 && echo GWM_MCP" 2>/dev/null)"
+          printf '  %-12s %s · %s\n' "$h" \
+            "$(grep -q GWM_REACH <<<"$r" && echo "$(c 32)reaches a browser$(c 0)" || echo "$(c 31)no browser$(c 0)")" \
+            "$(grep -q GWM_MCP <<<"$r" && echo "tools added" || echo "tools not added (default account) → gwm chrome")" > "$tmp/$(printf '%04d' "$i")" ) &
+      done
+      wait; cat "$tmp"/* 2>/dev/null; rm -rf "$tmp" ;;
   esac
 }
 
@@ -1157,7 +1296,7 @@ cmd_chrome() {  # gwm chrome [start|stop|status] [--to machine]…
 #      a token cuts off browsers already logged in with it.
 WEB_PORT=8082        # local, loopback only
 WEB_HTTPS_PORT=8443  # on your tailnet
-web_url() { local d; d="$(tailscale status --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null)"; echo "https://$d:$WEB_HTTPS_PORT/$HUBNAME"; }
+web_url() { echo "https://$(ts_self_dns):$WEB_HTTPS_PORT/$HUBNAME"; }
 web_online() { zellij --config "$DIR/hub.zellij.kdl" web --status --timeout 3 2>/dev/null | grep -qi online; }
 serve_on()   { tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$WEB_PORT"; }
 ts_serve() {  # run `tailscale serve ...`; use sudo only if Tailscale says this user isn't allowed to
@@ -1175,8 +1314,7 @@ cmd_web() {
     command -v zellij >/dev/null || die "zellij not installed (brew install zellij)"
     ts_running || die "Tailscale isn't running on this Mac — run: gwm tailscale"
     [ -n "$(self_name)" ] || die "run 'gwm init' first"
-    for v in $(env | sed -n 's/^\(CLAUDECODE\|CLAUDE_CODE_[A-Z_]*\)=.*/\1/p'); do unset "$v"; done
-    unset TERM_SESSION_ID SHELL_SESSION_ID
+    scrub_env
     # 1. the hub (started in the background if it isn't running; nothing inside it is auto-launched)
     if ! hub_running; then
       zellij delete-session "$HUBNAME" >/dev/null 2>&1; write_layout
@@ -1189,9 +1327,13 @@ cmd_web() {
     # 2. the local web server — loopback only
     if ! web_online; then
       zellij --config "$DIR/hub.zellij.kdl" web --daemonize >/dev/null 2>&1 || die "couldn't start the web server"
-      sleep 1
     fi
-    local binds; binds="$(lsof -nP -iTCP:$WEB_PORT -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}')"
+    local binds="" _i
+    for _i in $(seq 1 30); do
+      binds="$(lsof -nP -iTCP:$WEB_PORT -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}')"
+      [ -n "$binds" ] && break
+      sleep 0.1
+    done
     if [ -z "$binds" ]; then
       zellij --config "$DIR/hub.zellij.kdl" web --stop >/dev/null 2>&1; die "the web server didn't come up on 127.0.0.1:$WEB_PORT"
     fi
@@ -1255,8 +1397,11 @@ for p in (d.get("Peer") or {}).values():
 cmd_add() {
   local n="" addr="" user="" role="" yes="" via=""
   while [ $# -gt 0 ]; do case "$1" in
-    --address) addr="$2"; shift 2;; --user) user="$2"; shift 2;; --role) role="$2"; shift 2;; -y|--yes) yes=1; shift;;
-    --via) via="$2"; shift 2;;
+    --address) [ $# -ge 2 ] || die "--address needs a value"; addr="$2"; shift 2;;
+    --user) [ $# -ge 2 ] || die "--user needs a value"; user="$2"; shift 2;;
+    --role) [ $# -ge 2 ] || die "--role needs a value"; role="$2"; shift 2;;
+    -y|--yes) yes=1; shift;;
+    --via) [ $# -ge 2 ] || die "--via needs tailscale or ssh"; via="$2"; shift 2;;
     *) n="$1"; shift;; esac; done
   [ -n "$(self_name)" ] || die "run 'gwm init' on this machine first"
   local me mytarget; me="$(self_name)"; mytarget="$(hfield "$me" 2)"
@@ -1296,7 +1441,8 @@ cmd_add() {
   addr="${addr#*@}"
 
   # 2. can we reach it at all?
-  if ! nc -z -G 4 "$addr" 22 >/dev/null 2>&1; then
+  local nc_flag="-w"; [ "$(uname)" = Darwin ] && nc_flag="-G"
+  if ! nc -z "$nc_flag" 4 "$addr" 22 >/dev/null 2>&1; then
     echo "$(c 31)✗$(c 0) $addr isn't accepting SSH connections."
     if [ "$via" = tailscale ]; then
       echo "  On that Mac, run $(c 1)gwm tailscale$(c 0) (or: sudo tailscale set --ssh) to turn on Tailscale SSH, then run gwm add again."
@@ -1343,7 +1489,9 @@ cmd_add() {
 
   # 5. what is it?
   local info; info="$(run_script_target "$t" 'echo "host=$(scutil --get LocalHostName 2>/dev/null || hostname -s)"; echo "os=$(sw_vers -productVersion 2>/dev/null || uname -sr)"
-    echo "ram=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"; echo "model=$(sysctl -n hw.model 2>/dev/null || uname -m)"
+    if [ "$(uname)" = Darwin ]; then echo "ram=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
+    else echo "ram=$(awk "/MemTotal/{printf \"%.0f\", \$2/1048576}" /proc/meminfo 2>/dev/null || echo 0)"; fi
+    echo "model=$(sysctl -n hw.model 2>/dev/null || uname -m)"
     for x in brew tmux zellij claude opencode omlx ollama limactl tailscale; do command -v $x >/dev/null && echo "has=$x"; done')"
   local rhost ros rram rmodel; rhost="$(sed -n 's/^host=//p' <<<"$info")"; ros="$(sed -n 's/^os=//p' <<<"$info")"
   rram="$(sed -n 's/^ram=//p' <<<"$info")"; rmodel="$(sed -n 's/^model=//p' <<<"$info")"
@@ -1391,7 +1539,7 @@ cmd_add() {
     run_script_target "$t" '[ -e ~/go-with-me ] && [ ! -f ~/go-with-me/go-with-me ] && echo NOT_GWM' | grep -q NOT_GWM &&
       die "~/go-with-me on '$n' exists but isn't go-with-me — not overwriting it"
     run_script_target "$t" 'for f in hosts.conf sessions.conf self coordinator; do [ -f ~/.config/go-with-me/$f ] && cp ~/.config/go-with-me/$f ~/.config/go-with-me/$f.bak; done; true' >/dev/null 2>&1
-    rsync -a --delete --exclude .DS_Store --exclude .git -e "ssh -o BatchMode=yes -o LogLevel=ERROR" "$DIR/" "$t:go-with-me/" &&
+    rsync -a --delete --exclude .DS_Store --exclude .git --exclude target --exclude __pycache__ --exclude .claude -e "ssh -o BatchMode=yes -o LogLevel=ERROR" "$DIR/" "$t:go-with-me/" &&
     run_script_target "$t" "mkdir -p ~/.config/go-with-me/accounts" &&
     scp -q -o BatchMode=yes "$HOSTS" "$SESSIONS" "$t:.config/go-with-me/" &&
     run_script_target "$t" "~/go-with-me/install.sh >/dev/null && echo $n > ~/.config/go-with-me/self && echo ok" | grep -q ok &&
@@ -1399,9 +1547,10 @@ cmd_add() {
     # keep every other machine's copy of the config in sync
     while IFS=$'\t' read -r h ht _; do
       [ "$h" = "$me" ] || [ "$h" = "$n" ] && continue; case "$ht" in vm:*) continue;; esac
-      run_script "$h" 'for f in hosts.conf sessions.conf; do [ -f ~/.config/go-with-me/$f ] && cp ~/.config/go-with-me/$f ~/.config/go-with-me/$f.bak; done; true' >/dev/null 2>&1
-      scp -q -o BatchMode=yes -o ConnectTimeout=4 "$HOSTS" "$SESSIONS" "$ht:.config/go-with-me/" 2>/dev/null
+      ( run_script "$h" 'for f in hosts.conf sessions.conf; do [ -f ~/.config/go-with-me/$f ] && cp ~/.config/go-with-me/$f ~/.config/go-with-me/$f.bak; done; true' >/dev/null 2>&1
+        scp -q -o BatchMode=yes -o ConnectTimeout=4 "$HOSTS" "$SESSIONS" "$ht:.config/go-with-me/" 2>/dev/null ) &
     done < <(hosts)
+    wait
   fi
 
   # 9. a tab for it
@@ -1418,13 +1567,35 @@ run_script_target() {  # like run_script, but for a raw user@address that isn't 
 cmd_remove() {
   local n="${1:-}"; [ -n "$n" ] || die "usage: gwm remove <machine>"; need_host "$n"
   [ "$n" = "$(self_name)" ] && die "can't remove this machine"
-  awk -F'|' -v n="$n" '{v=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$HOSTS" > "$HOSTS.new" && mv "$HOSTS.new" "$HOSTS"
-  awk -F'|' -v n="$n" '{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",v)} v!=n' "$SESSIONS" > "$SESSIONS.new" && mv "$SESSIONS.new" "$SESSIONS"
+  filter_conf "$HOSTS" 1 "$n"
+  filter_conf "$SESSIONS" 2 "$n"
   echo "$(c 32)✓$(c 0) Removed '$n' and its sessions from this machine's config (nothing on '$n' was changed)."
 }
-cmd_sync() { local h="$1"; need_host "$h"
-  for f in hosts.conf sessions.conf; do run_script "$h" "cat ~/.config/go-with-me/$f" > "$CFG/$f.new" && mv "$CFG/$f.new" "$CFG/$f"; done
+cmd_sync() { local h="$1" f tmp locked; need_host "$h"
+  for f in hosts.conf sessions.conf; do
+    tmp="$(mktemp "$CFG/$f.XXXXXX")"
+    if run_script "$h" "cat ~/.config/go-with-me/$f" > "$tmp" && [ -s "$tmp" ]; then
+      locked=0; cfg_lock && locked=1; mv "$tmp" "$CFG/$f"; [ $locked -eq 1 ] && cfg_unlock
+    else rm -f "$tmp"; die "couldn't read $f from $h (offline or empty — local config untouched)"; fi
+  done
   echo "Copied hosts + sessions config from $h."; }
+cmd_sync_push() {  # send any missing sessions to every other machine in one parallel SSH pass
+  local payload enc h t
+  payload="$(sessions | awk -F'\t' '{printf "%-14s| %-8s| %-9s| %-8s| %s\n", $1, $2, $3, $4, $5}')"
+  [ -n "$payload" ] || { echo "$(c 32)✓$(c 0) no sessions to push"; return; }
+  enc="$(printf '%s\n' "$payload" | base64 | tr -d '\n')"
+  while IFS=$'\t' read -r h t _; do
+    is_local "$h" && continue; case "$t" in vm:*) continue;; esac
+    ( run_script "$h" "f=~/.config/go-with-me/sessions.conf; [ -f \$f ] || exit 0
+printf %s $enc | base64 -d | while IFS= read -r ln; do
+  n=\$(printf '%s' \"\$ln\" | awk -F'|' '{v=\$1; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v); print v}')
+  [ -n \"\$n\" ] || continue
+  awk -F'|' -v n=\"\$n\" '{v=\$1; gsub(/^[[:space:]]+|[[:space:]]+\$/,\"\",v)} v==n{ok=1; exit} END{exit !ok}' \"\$f\" || printf '%s\n' \"\$ln\" >> \"\$f\"
+done" >/dev/null 2>&1 || echo "$(c 33)•$(c 0) couldn't update '$h' (offline?)" ) &
+  done < <(hosts)
+  wait
+  echo "$(c 32)✓$(c 0) sent any missing sessions to every machine"
+}
 
 # check the config once per command (warnings), then read it quietly everywhere else
 if [ -z "${GWM_QUIET:-}" ] && [ -f "$HOSTS" ] && [ -f "$SESSIONS" ]; then hosts >/dev/null; sessions >/dev/null; fi
@@ -1465,9 +1636,9 @@ case "${1:-open}" in
   tailscale) cmd_tailscale ;;
   keys) shift; cmd_keys "$@" ;;
   web) shift; cmd_web "$@" ;;
-  init) cmd_init "${2:-}" ;;  add) shift; cmd_add "$@" ;;  remove) [ $# -ge 2 ] || die "usage: gwm remove <machine>"; cmd_remove "$2" ;;  sync) [ $# -ge 2 ] || die "usage: gwm sync <host> | gwm sync --push"
-        if [ "$2" = --push ]; then sessions >/dev/null; while IFS=$'\t' read -r n _; do sync_session add "$n" "$(grep -E "^[[:space:]]*$n[[:space:]]*\|" "$SESSIONS" | head -1)"; done < <(sessions); echo "$(c 32)✓$(c 0) sent any missing sessions to every machine"
-        else cmd_sync "$2"; fi ;;
+  init) cmd_init "${2:-}" ;;  add) shift; cmd_add "$@" ;;  remove) [ $# -ge 2 ] || die "usage: gwm remove <machine>"; cmd_remove "$2" ;;
+  sync) [ $# -ge 2 ] || die "usage: gwm sync <host> | gwm sync --push"
+        if [ "$2" = --push ]; then cmd_sync_push; else cmd_sync "$2"; fi ;;
   edit) ${EDITOR:-nano} "$HOSTS" "$SESSIONS" ;;
   -h|--help|help) awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$ME" ;;
   *) die "unknown command '$1' (gwm help)" ;;
