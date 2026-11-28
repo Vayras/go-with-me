@@ -11,11 +11,25 @@
       "Bash(gwm remove:*)",
       "Bash(gwm sync:*)",
       "Bash(gwm web:*)",
+      "Bash(gwm spawn:*)",
+      "Bash(gwm resume:*)",
+      "Bash(gwm share:*)",
+      "Bash(gwm paste:*)",
+      "Bash(gwm chrome:*)",
+      "Bash(gwm pull:*)",
+      "Bash(gwm login:*)",
+      "Bash(gwm opencode-setup:*)",
       "Bash(go-with-me run:*)",
       "Bash(go-with-me send:*)",
-      "Bash(ssh:*)",
-      "Bash(gwm spawn:*)",
-      "Bash(gwm resume:*)"
+      "Bash(go-with-me close:*)",
+      "Bash(go-with-me stop:*)",
+      "Bash(go-with-me new:*)",
+      "Bash(go-with-me spawn:*)",
+      "Bash(go-with-me resume:*)",
+      "Bash(go-with-me share:*)",
+      "Bash(go-with-me paste:*)",
+      "Bash(go-with-me chrome:*)",
+      "Bash(ssh:*)"
     ]
   }
 }

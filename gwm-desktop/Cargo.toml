@@ -9,9 +9,11 @@ license = "MIT"
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "clipboard", "system_fonts"] }
 egui = "0.37"
 alacritty_terminal = "0.26"
-arboard = "3.7"
+arboard = { version = "3.7", default-features = false }
 
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 strip = true

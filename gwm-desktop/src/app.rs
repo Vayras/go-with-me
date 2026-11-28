@@ -106,6 +106,7 @@ pub struct App {
     browser_pending: Option<bool>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+    poll_wake: Sender<()>,
     tabs: Vec<Tab>,
     active: usize,
     sidebar: bool,
@@ -128,7 +129,7 @@ pub struct App {
 impl App {
     pub fn new(ctx: &egui::Context, open: Vec<String>, screenshot: Option<PathBuf>, show: Option<String>) -> Self {
         let (tx, rx) = channel();
-        gwm::spawn_poller(tx.clone(), ctx.clone());
+        let poll_wake = gwm::spawn_poller(tx.clone(), ctx.clone());
         let mut app = Self {
             state: State::default(),
             peers: Vec::new(),
@@ -136,6 +137,7 @@ impl App {
             browser_pending: None,
             tx,
             rx,
+            poll_wake,
             tabs: Vec::new(),
             active: 0,
             sidebar: true,
@@ -236,15 +238,8 @@ impl App {
         self.toasts.push(Toast { text: text.into(), ok, at: Instant::now() });
     }
 
-    fn refresh_now(&self, ctx: &egui::Context) {
-        let tx = self.tx.clone();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            if let Ok(o) = gwm::command(&["_data"]).stderr(std::process::Stdio::null()).output() {
-                let _ = tx.send(Msg::State(gwm::parse_data(&String::from_utf8_lossy(&o.stdout))));
-                ctx.request_repaint();
-            }
-        });
+    fn refresh_now(&self) {
+        let _ = self.poll_wake.send(());
     }
 
     fn handle_messages(&mut self, ctx: &egui::Context) {
@@ -271,7 +266,7 @@ impl App {
                             let name = name.clone();
                             if ok {
                                 self.pending.retain(|p| p.job != id);
-                                self.refresh_now(ctx);
+                                self.refresh_now();
                                 // settle the optimistic tab into a live terminal
                                 if let Some(i) = self.tabs.iter().position(|t| t.key == name) {
                                     let mut tab = self.tabs.remove(i);
@@ -290,7 +285,7 @@ impl App {
                         JobKind::EndSession(name) => {
                             let name = name.clone();
                             self.ending.remove(&name);
-                            self.refresh_now(ctx);
+                            self.refresh_now();
                             if ok {
                                 self.toast(format!("Ended '{name}' (its screen is in the archive)"), true);
                             } else {
@@ -312,6 +307,9 @@ impl App {
                 }
             }
         }
+        // Drop completed jobs that aren't attached to a pending/failed tab so memory stays bounded.
+        let tabs = &self.tabs;
+        self.jobs.retain(|id, j| j.done.is_none() || tabs.iter().any(|t| t.pending == Some(*id)));
         self.toasts.retain(|t| t.at.elapsed() < Duration::from_secs(6));
     }
 
@@ -718,72 +716,78 @@ impl App {
     // ---------- tab bar ----------
     fn tab_bar(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
-        let p = ui.painter().clone();
-        p.rect_filled(rect, 0.0, theme::PANEL);
-        p.line_segment([rect.left_bottom() - vec2(0.0, 0.5), rect.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, theme::BORDER_SOFT));
-        let mut x = rect.left();
+        let h = rect.height();
+        ui.painter().rect_filled(rect, 0.0, theme::PANEL);
+        ui.painter().line_segment([rect.left_bottom() - vec2(0.0, 0.5), rect.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, theme::BORDER_SOFT));
         let font = FontId::proportional(12.5);
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let label = self.label_of(&tab.key);
-            let host = self.host_of(&tab.key);
-            let text_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::TEXT).size().x);
-            let host_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(host.clone(), FontId::proportional(11.0), theme::FAINT).size().x);
-            let w = (text_w + host_w + 72.0).clamp(110.0, 280.0);
-            let r = Rect::from_min_size(pos2(x, rect.top()), vec2(w, rect.height()));
-            let resp = ui.interact(r, ui.scope_id().with(("tab", &tab.key)), Sense::click());
-            let active = i == self.active;
-            let bg = if active { theme::EDITOR } else if resp.hovered() { theme::HOVER } else { theme::PANEL };
-            p.rect_filled(r, 0.0, bg);
-            p.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, theme::BORDER_SOFT));
-            if !active {
-                p.line_segment([r.left_bottom() - vec2(0.0, 0.5), r.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, theme::BORDER_SOFT));
-            }
-            let failed = self.pending.iter().any(|pd| pd.form.name == tab.key && pd.failed);
-            let icon_r = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(11.0, 11.0));
-            if tab.pending.is_some() && !failed {
-                egui::Spinner::new().size(11.0).color(theme::ACCENT).paint_at(ui, icon_r);
-            } else {
-                let c = if failed { theme::RED } else if tab.term.as_ref().is_some_and(|t| t.exited) { theme::FAINT } else { theme::ACCENT };
-                p.text(icon_r.center(), Align2::CENTER_CENTER, self.icon_of(&tab.key), theme::mono(12.0), c);
-            }
-            p.text(pos2(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, &label, font.clone(), if active { theme::TEXT } else { theme::MUTED });
-            p.text(pos2(r.left() + 34.0 + text_w, r.center().y + 0.5), Align2::LEFT_CENTER, &host, FontId::proportional(11.0), theme::FAINT);
-            let close = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(16.0, 16.0));
-            let close_resp = ui.interact(close, ui.scope_id().with(("close", &tab.key)), Sense::click());
-            if active || resp.hovered() || close_resp.hovered() {
-                if close_resp.hovered() {
-                    p.rect_filled(close, 3.0, theme::SELECTED);
-                }
-                p.text(close.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), theme::MUTED);
-            }
-            if close_resp.clicked() || resp.middle_clicked() {
-                self.actions.push(Action::Close(i));
-            } else if resp.clicked() {
-                self.actions.push(Action::Activate(i));
-            }
-            let _ = close_resp.on_hover_text("Close tab (the session keeps running)");
-            let key = tab.key.clone();
-            resp.context_menu(|ui| {
-                if ui.button("Close tab").clicked() {
-                    self.actions.push(Action::Close(i));
-                    ui.close();
-                }
-                if key != COORD && tab.pending.is_none() && ui.button(RichText::new("End session…").color(theme::RED)).clicked() {
-                    self.actions.push(Action::EndSession(key.clone()));
-                    ui.close();
-                }
+        egui::ScrollArea::horizontal()
+            .id_salt("gwm-tabs")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                ui.horizontal(|ui| {
+                    for (i, tab) in self.tabs.iter().enumerate() {
+                        let label = self.label_of(&tab.key);
+                        let host = self.host_of(&tab.key);
+                        let text_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::TEXT).size().x);
+                        let host_w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(host.clone(), FontId::proportional(11.0), theme::FAINT).size().x);
+                        let w = (text_w + host_w + 72.0).clamp(110.0, 280.0);
+                        let (r, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+                        let p = ui.painter();
+                        let active = i == self.active;
+                        let bg = if active { theme::EDITOR } else if resp.hovered() { theme::HOVER } else { theme::PANEL };
+                        p.rect_filled(r, 0.0, bg);
+                        p.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, theme::BORDER_SOFT));
+                        if !active {
+                            p.line_segment([r.left_bottom() - vec2(0.0, 0.5), r.right_bottom() - vec2(0.0, 0.5)], Stroke::new(1.0, theme::BORDER_SOFT));
+                        }
+                        let failed = self.pending.iter().any(|pd| pd.form.name == tab.key && pd.failed);
+                        let icon_r = Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(11.0, 11.0));
+                        if tab.pending.is_some() && !failed {
+                            egui::Spinner::new().size(11.0).color(theme::ACCENT).paint_at(ui, icon_r);
+                        } else {
+                            let c = if failed { theme::RED } else if tab.term.as_ref().is_some_and(|t| t.exited) { theme::FAINT } else { theme::ACCENT };
+                            p.text(icon_r.center(), Align2::CENTER_CENTER, self.icon_of(&tab.key), theme::mono(12.0), c);
+                        }
+                        p.text(pos2(r.left() + 28.0, r.center().y), Align2::LEFT_CENTER, &label, font.clone(), if active { theme::TEXT } else { theme::MUTED });
+                        p.text(pos2(r.left() + 34.0 + text_w, r.center().y + 0.5), Align2::LEFT_CENTER, &host, FontId::proportional(11.0), theme::FAINT);
+                        let close = Rect::from_center_size(pos2(r.right() - 16.0, r.center().y), vec2(16.0, 16.0));
+                        let close_resp = ui.interact(close, ui.scope_id().with(("close", &tab.key)), Sense::click());
+                        if active || resp.hovered() || close_resp.hovered() {
+                            if close_resp.hovered() {
+                                p.rect_filled(close, 3.0, theme::SELECTED);
+                            }
+                            p.text(close.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), theme::MUTED);
+                        }
+                        if close_resp.clicked() || resp.middle_clicked() {
+                            self.actions.push(Action::Close(i));
+                        } else if resp.clicked() {
+                            self.actions.push(Action::Activate(i));
+                        }
+                        let _ = close_resp.on_hover_text("Close tab (the session keeps running)");
+                        let key = tab.key.clone();
+                        resp.context_menu(|ui| {
+                            if ui.button("Close tab").clicked() {
+                                self.actions.push(Action::Close(i));
+                                ui.close();
+                            }
+                            if key != COORD && tab.pending.is_none() && ui.button(RichText::new("End session…").color(theme::RED)).clicked() {
+                                self.actions.push(Action::EndSession(key.clone()));
+                                ui.close();
+                            }
+                        });
+                    }
+                    let (plus, pr) = ui.allocate_exact_size(vec2(34.0, h), Sense::click());
+                    let pr = pr.on_hover_text("New session (⌘T)");
+                    if pr.hovered() {
+                        ui.painter().rect_filled(plus.shrink(5.0), 4.0, theme::HOVER);
+                    }
+                    ui.painter().text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(16.0), theme::MUTED);
+                    if pr.clicked() {
+                        self.actions.push(Action::NewSession(None));
+                    }
+                });
             });
-            x += w;
-        }
-        let plus = Rect::from_min_size(pos2(x, rect.top()), vec2(34.0, rect.height()));
-        let pr = ui.interact(plus, ui.scope_id().with("plus"), Sense::click()).on_hover_text("New session (⌘T)");
-        if pr.hovered() {
-            p.rect_filled(plus.shrink(5.0), 4.0, theme::HOVER);
-        }
-        p.text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(16.0), theme::MUTED);
-        if pr.clicked() {
-            self.actions.push(Action::NewSession(None));
-        }
     }
 
     // ---------- status bar: machines (left) · what's happening (middle) · help (right) ----------

@@ -11,14 +11,16 @@ Layout, grouped by what belongs together:
 Click a line (or ↑/↓ + Enter) to jump; opening a stopped session starts it. Keys: n new · x close · r refresh · ? help.
 State comes from `gwm _data` (one shared, cached SSH sweep); tabs are driven with `zellij action`.
 """
-import curses, json, os, subprocess, sys, threading, time
+import curses, fcntl, json, os, subprocess, sys, threading, time
 
 GWM = sys.argv[1] if len(sys.argv) > 1 else "gwm"
 ICON = {"claude": "✻", "opencode": "◇", "shell": "$", "kimi": "◆", "codex": "◎", "gemini": "✦"}
 state = {"self": "", "hosts": [], "sessions": [], "probe": {}, "used": {}, "ok": False}
 tabs = {"list": [], "active": None}
 lock = threading.Lock()
+wake = threading.Event()
 offset = 0          # sidebar scroll position
+_leader_fd = None
 
 # colour pairs
 ACCENT, GREEN, YELLOW, RED, GREY, BLUE, MAGENTA, SEL = range(1, 9)
@@ -92,24 +94,21 @@ seen_running = None   # sessions that were running at the previous check (None =
 
 
 def is_leader():
-    """Only one sidebar per hub keeps the tabs in step (every tab has its own sidebar)."""
+    """Atomic kernel lock so exactly one sidebar per hub syncs tabs; released automatically on exit/crash."""
+    global _leader_fd
     if not HUB:
         return False
-    lock = os.path.join(CFG, f".sidebar-leader-{HUB}")
+    if _leader_fd is not None:
+        return True
     try:
-        other = int(open(lock).read().strip() or 0)
-    except (OSError, ValueError):
-        other = 0
-    if other and other != os.getpid():
-        try:
-            os.kill(other, 0); return False            # another sidebar is in charge
-        except OSError:
-            pass                                        # it's gone: take over
-    try:
-        open(lock, "w").write(str(os.getpid()))
+        fd = os.open(os.path.join(CFG, f".sidebar-leader-{HUB}"), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _leader_fd = fd
+        return True
     except OSError:
+        try: os.close(fd)
+        except Exception: pass
         return False
-    return True
 
 
 def sync_tabs():
@@ -126,10 +125,7 @@ def sync_tabs():
     open_tabs = {t["name"] for t in tablist}
     for t in tablist:
         n = t["name"]
-        if n == "overview" or t["id"] is None:
-            continue
-        gone = n not in saved and n not in running
-        if gone:
+        if n != "overview" and t["id"] is not None and n not in saved and n not in running:
             run("zellij", "action", "close-tab-by-id", str(t["id"]), timeout=5)
     now_running = {n for n in running if n in saved and host_of.get(n) in up}
     if seen_running is not None:
@@ -142,15 +138,14 @@ def poller():
     n = 0
     while True:
         load_tabs()
-        if n % 4 == 0:
+        if n % 4 == 0 or wake.is_set():
+            wake.clear()
             load_data()
             if is_leader():
-                try:
-                    sync_tabs()
-                except Exception:
-                    pass
+                try: sync_tabs()
+                except Exception: pass
         n += 1
-        time.sleep(1.5)
+        wake.wait(1.5)
 
 
 def session_state(s):
@@ -158,24 +153,15 @@ def session_state(s):
     with lock:
         hp = state["probe"].get(s["host"], {})
     if not hp.get("up"):
-        if "approval" in hp:
-            return "approval", YELLOW, "Tailscale SSH needs re-approval"
-        return "offline", RED, ""
+        return ("approval", YELLOW, "Tailscale SSH needs re-approval") if "approval" in hp else ("offline", RED, "")
     info = hp["sessions"].get(s["name"])
     if not info:
         return "off", GREY, ""
     idle = info["idle"]
+    title = info["title"].lstrip("✳✻ ").strip()
     if idle < 8:
-        return "working", YELLOW, info["title"].lstrip("✳✻ ").strip()
-    label = f"{idle // 60}m" if idle < 3600 else f"{idle // 3600}h"
-    return label, GREEN, info["title"].lstrip("✳✻ ").strip()
-
-
-def short_models(m):
-    names = [x.split(":")[0] for x in (m or "").split(",") if x and x != "-"]
-    if not names:
-        return ""
-    return names[0] + (f" +{len(names) - 1}" if len(names) > 1 else "")
+        return "working", YELLOW, title
+    return (f"{idle // 60}m" if idle < 3600 else f"{idle // 3600}h"), GREEN, title
 
 
 # ---------------------------------------------------------------- layout
@@ -459,7 +445,7 @@ def activate(target):
             if cur and cur != "overview":
                 floating(["bash", "-c", '"$0" close "$1"; echo; read -rsn1 -p "Press any key to close this window"', GWM, cur], "end session")
         elif key == "refresh":
-            threading.Thread(target=load_data, daemon=True).start()
+            wake.set()
         elif key.startswith("saved:"):
             host = key.split(":", 1)[1]
             floating(["bash", "-c", '''echo "Saved sessions on $1 (not running):"; echo

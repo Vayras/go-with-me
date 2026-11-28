@@ -22,28 +22,35 @@ def sh(*a):
         return ""
 
 
+def proc_cwd(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        cwd = sh("lsof", "-a", "-p", pid, "-d", "cwd", "-Fn")
+        return next((l[1:] for l in cwd.splitlines() if l.startswith("n")), "")
+
+
 def find_live():
     """(folder, config dir) of a claude process running in tmux session gwm-<name>, if any."""
     pane = sh("tmux", "display", "-p", "-t", f"=gwm-{name}:", "#{pane_pid}")
     if not pane:
         return None
     procs = {}
-    for ln in sh("ps", "-axo", "pid=,ppid=,comm=").splitlines():
-        p = ln.split(None, 2)
-        if len(p) == 3:
-            procs[p[0]] = (p[1], os.path.basename(p[2]))
-    for pid, (ppid, comm) in procs.items():
-        if comm != "claude":
+    for ln in sh("ps", "-axo", "pid=,ppid=,comm=,args=").splitlines():
+        p = ln.split(None, 3)
+        if len(p) >= 3:
+            procs[p[0]] = (p[1], os.path.basename(p[2]), p[3] if len(p) > 3 else "")
+    for pid, (ppid, comm, args) in procs.items():
+        arg0 = args.split(None, 1)[0] if args else ""
+        if comm != "claude" and os.path.basename(arg0) != "claude" and "/claude/" not in arg0:
             continue
         q = ppid
         while q in procs and q != pane:
             q = procs[q][0]
         if q == pane:
-            cwd = sh("lsof", "-a", "-p", pid, "-d", "cwd", "-Fn")
-            cwd = next((l[1:] for l in cwd.splitlines() if l.startswith("n")), "")
             env = sh("tmux", "show-environment", "-t", f"=gwm-{name}", "CLAUDE_CONFIG_DIR")
             cfg = env.split("=", 1)[1] if env.startswith("CLAUDE_CONFIG_DIR=") else os.path.expanduser("~/.claude")
-            return cwd or None, cfg
+            return proc_cwd(pid) or None, cfg
     return None
 
 
@@ -54,25 +61,22 @@ if live and not folder:
 slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(folder))
 files = sorted(glob.glob(os.path.join(config, "projects", slug, "*.jsonl")), key=os.path.getmtime, reverse=True)
 if locate and not live:
-    # claude isn't running in the session: only accept a conversation that was active while this session existed,
-    # never just "the newest one in the folder" (that may belong to another session)
     created = sh("tmux", "display", "-p", "-t", f"=gwm-{name}:", "#{session_created}")
     files = [f for f in files if created.isdigit() and os.path.getmtime(f) >= int(created)][:1]
 if explicit and os.path.isfile(explicit):
     files = [explicit]
 if not files:
-    if locate:
-        print("{}"); sys.exit(0)
-    print(f"[{name}] no Claude conversation found (folder {folder}, account dir {config})")
+    print("{}" if locate else f"[{name}] no Claude conversation found (folder {folder}, account dir {config})")
     sys.exit(0)
 
 path = files[0]
 title, msgs = "", []
 if locate:   # describe the conversation (for resuming later) without printing it
-    for raw in open(path, errors="replace"):
-        if '"ai-title"' in raw:
-            try: title = json.loads(raw).get("aiTitle") or title
-            except ValueError: pass
+    with open(path, errors="replace") as fh:
+        for raw in fh:
+            if '"ai-title"' in raw:
+                try: title = json.loads(raw).get("aiTitle") or title
+                except ValueError: pass
     print(json.dumps({"transcript": path, "session_id": os.path.basename(path)[:-6], "folder": folder,
                       "config": config, "title": title, "live": bool(live)}))
     sys.exit(0)
@@ -83,34 +87,32 @@ def clip(t, n=700):
     return t if len(t) <= n else t[:n] + " …"
 
 
-for raw in open(path, errors="replace"):
-    try:
-        d = json.loads(raw)
-    except ValueError:
-        continue
-    kind = d.get("type")
-    if kind == "ai-title":
-        title = d.get("aiTitle") or d.get("title") or title
-        continue
-    if kind not in ("user", "assistant"):
-        continue
-    c = (d.get("message") or {}).get("content")
-    parts = []
-    if isinstance(c, str):
-        parts.append(c)
-    elif isinstance(c, list):
-        for b in c:
-            t = b.get("type")
-            if t == "text":
-                parts.append(b.get("text", ""))
-            elif t == "tool_use":
-                inp = b.get("input") or {}
-                brief = inp.get("command") or inp.get("file_path") or inp.get("description") or inp.get("pattern") or ""
-                parts.append(f"→ {b.get('name')}: {str(brief)[:160]}")
-    text = "\n".join(p for p in parts if p and p.strip())
-    if not text or text.startswith("<"):          # skip system/hook wrappers
-        continue
-    msgs.append(("you" if kind == "user" else "claude", clip(text)))
+with open(path, errors="replace") as fh:
+    for raw in fh:
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        kind = d.get("type")
+        if kind == "ai-title":
+            title = d.get("aiTitle") or d.get("title") or title
+            continue
+        if kind not in ("user", "assistant"):
+            continue
+        c = (d.get("message") or {}).get("content")
+        parts = [c] if isinstance(c, str) else []
+        if isinstance(c, list):
+            for b in c:
+                t = b.get("type")
+                if t == "text":
+                    parts.append(b.get("text", ""))
+                elif t == "tool_use":
+                    inp = b.get("input") or {}
+                    brief = inp.get("command") or inp.get("file_path") or inp.get("description") or inp.get("pattern") or ""
+                    parts.append(f"→ {b.get('name')}: {str(brief)[:160]}")
+        text = "\n".join(p for p in parts if p and p.strip())
+        if text and not text.startswith("<"):          # skip system/hook wrappers
+            msgs.append(("you" if kind == "user" else "claude", clip(text)))
 
 age = int(time.time() - os.path.getmtime(path))
 when = f"{age // 60}m ago" if age < 3600 else (f"{age // 3600}h ago" if age < 86400 else f"{age // 86400}d ago")

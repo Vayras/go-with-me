@@ -5,26 +5,30 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::sync::OnceLock;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-/// Where `gwm` lives. Apps opened from Finder get a minimal PATH, so look in the usual places.
-pub fn gwm_path() -> PathBuf {
-    if let Ok(p) = std::env::var("GWM") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    for p in [
-        format!("{home}/.local/bin/gwm"),
-        format!("{home}/go-with-me/go-with-me"),
-        "/opt/homebrew/bin/gwm".into(),
-        "/usr/local/bin/gwm".into(),
-    ] {
-        if std::path::Path::new(&p).exists() {
+/// Where `gwm` lives. Apps opened from Finder get a minimal PATH, so look in the usual places (cached once).
+pub fn gwm_path() -> &'static PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        if let Ok(p) = std::env::var("GWM") {
             return PathBuf::from(p);
         }
-    }
-    PathBuf::from("gwm")
+        let home = std::env::var("HOME").unwrap_or_default();
+        for p in [
+            format!("{home}/.local/bin/gwm"),
+            format!("{home}/go-with-me/go-with-me"),
+            "/opt/homebrew/bin/gwm".into(),
+            "/usr/local/bin/gwm".into(),
+        ] {
+            if std::path::Path::new(&p).exists() {
+                return PathBuf::from(p);
+            }
+        }
+        PathBuf::from("gwm")
+    })
 }
 
 pub fn command(args: &[&str]) -> Command {
@@ -221,8 +225,9 @@ pub enum Msg {
     JobDone(u64, bool, String),
 }
 
-/// Poll `gwm _data`, `gwm _tailnet` and the shared browser forever, in the background.
-pub fn spawn_poller(tx: Sender<Msg>, ctx: egui::Context) {
+/// Poll `gwm _data`, `gwm _tailnet` and the shared browser in the background. Returns a wake trigger for instant refresh.
+pub fn spawn_poller(tx: Sender<Msg>, ctx: egui::Context) -> Sender<()> {
+    let (wake_tx, wake_rx): (Sender<()>, Receiver<()>) = channel();
     std::thread::spawn(move || {
         let mut n: u64 = 0;
         loop {
@@ -251,9 +256,12 @@ pub fn spawn_poller(tx: Sender<Msg>, ctx: egui::Context) {
             let _ = tx.send(Msg::Browser(browser_up()));
             ctx.request_repaint();
             n += 1;
-            std::thread::sleep(Duration::from_secs(5));
+            if wake_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+                while wake_rx.try_recv().is_ok() {}
+            }
         }
     });
+    wake_tx
 }
 
 /// Is the gwm shared Chrome (gwm chrome) open on this Mac?
